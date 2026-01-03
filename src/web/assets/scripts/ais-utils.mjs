@@ -3,6 +3,107 @@ import { mmsiMidToCountry } from "./mmsi-mid-decoder.mjs";
 const METERS_PER_NM = 1852;
 const KNOTS_PER_M_PER_S = 1.94384;
 const LOST_TARGET_WARNING_AGE = 10 * 60; // in seconds - 10 minutes
+const TCPA_MAX_SECONDS = 3 * 3600; // Maximum TCPA to calculate (3 hours)
+
+/**
+ * Process a SignalK delta message and update the target in the targets map.
+ * Shared between frontend (WebSocket) and backend (subscription).
+ * @param {Object} delta - The SignalK delta message
+ * @param {Map} targets - Map of targets keyed by MMSI
+ * @returns {string|null} - The MMSI of the updated target, or null if invalid
+ */
+export function processDelta(delta, targets) {
+	if (!delta.context) return null;
+
+	const mmsi = delta.context.slice(-9);
+	if (!mmsi || !/^[0-9]{9}$/.test(mmsi)) return null;
+
+	let target = targets.get(mmsi);
+	if (!target) {
+		target = { sog: 0, cog: 0, mmsi: mmsi };
+	}
+	target.context = delta.context;
+
+	const updates = delta.updates;
+	if (!updates) return mmsi;
+
+	for (const update of updates) {
+		const values = update.values;
+		if (!values) continue;
+
+		for (const value of values) {
+			switch (value.path) {
+				case "":
+					if (value.value.name) {
+						target.name = value.value.name;
+					} else if (value.value.communication?.callsignVhf) {
+						target.callsign = value.value.communication.callsignVhf;
+					} else if (value.value.registrations?.imo) {
+						target.imo = value.value.registrations.imo.replace(/imo/i, "");
+					}
+					break;
+				case "navigation.position":
+					target.latitude = value.value.latitude;
+					target.longitude = value.value.longitude;
+					target.lastSeenDate = new Date(update.timestamp);
+					break;
+				case "navigation.courseOverGroundTrue":
+					target.cog = value.value;
+					break;
+				case "navigation.speedOverGround":
+					target.sog = value.value;
+					break;
+				case "navigation.magneticVariation":
+					target.magvar = value.value;
+					break;
+				case "navigation.headingTrue":
+					target.hdg = value.value;
+					break;
+				case "navigation.rateOfTurn":
+					target.rot = value.value;
+					break;
+				case "design.aisShipType":
+					target.typeId = value.value.id;
+					target.type = value.value.name;
+					break;
+				case "navigation.state":
+					target.status = value.value;
+					break;
+				case "sensors.ais.class":
+					target.aisClass = value.value;
+					break;
+				case "navigation.destination.commonName":
+					target.destination = value.value;
+					break;
+				case "design.length":
+					target.length = value.value.overall;
+					break;
+				case "design.beam":
+					target.beam = value.value;
+					break;
+				case "design.draft":
+					target.draft = value.value.current;
+					break;
+				case "atonType":
+					target.typeId = value.value.id;
+					target.type = value.value.name;
+					if (target.status == null) {
+						target.status = "default";
+					}
+					break;
+				case "offPosition":
+					target.isOffPosition = value.value ? 1 : 0;
+					break;
+				case "virtual":
+					target.isVirtual = value.value ? 1 : 0;
+					break;
+			}
+		}
+	}
+
+	targets.set(mmsi, target);
+	return mmsi;
+}
 
 export function updateDerivedData(
 	targets,
@@ -60,13 +161,22 @@ function updateSingleTargetDerivedData(
 	collisionProfiles,
 	TARGET_MAX_AGE,
 ) {
-	target.y = target.latitude * 111120;
+	// Guard against null/undefined/NaN values
+	const lat = target.latitude ?? 0;
+	const lon = target.longitude ?? 0;
+	const sog = target.sog ?? 0;
+	const cog = target.cog ?? 0;
+	const selfLat = selfTarget.latitude ?? 0;
+
+	// Clamp latitude to avoid polar singularity (cos(90°) = 0)
+	const clampedSelfLat = Math.max(-89.9, Math.min(89.9, selfLat));
+
+	target.y = lat * 111120;
 	// Using self vessel latitude for longitude scaling is sufficient for short ranges
 	// An average of latitudes would improve accuracy for targets far N/S, but adds complexity
-	target.x =
-		target.longitude * 111120 * Math.cos(toRadians(selfTarget.latitude));
-	target.vy = target.sog * Math.cos(target.cog); // cog is in radians
-	target.vx = target.sog * Math.sin(target.cog); // cog is in radians
+	target.x = lon * 111120 * Math.cos(toRadians(clampedSelfLat));
+	target.vy = sog * Math.cos(cog); // cog is in radians
+	target.vx = sog * Math.sin(cog); // cog is in radians
 
 	if (target.mmsi !== selfTarget.mmsi) {
 		calculateRangeAndBearing(selfTarget, target);
@@ -204,9 +314,9 @@ function updateCpa(selfTarget, target) {
 	const tcpa = -dot(w0, dv) / dv2;
 
 	// if tcpa is in the past,
-	// or if tcpa is more than 3 hours in the future
+	// or if tcpa is more than TCPA_MAX_SECONDS in the future
 	// then dont calc cpa & tcpa
-	if (!tcpa || tcpa < 0 || tcpa > 3 * 3600) {
+	if (!tcpa || tcpa < 0 || tcpa > TCPA_MAX_SECONDS) {
 		//console.log('discarding tcpa: ', target.mmsi, tcpa);
 		target.cpa = null;
 		target.tcpa = null;
@@ -229,6 +339,13 @@ function updateCpa(selfTarget, target) {
 
 	// in meters
 	const cpa = dist(p1, p2);
+
+	// Guard against NaN results
+	if (!Number.isFinite(cpa) || !Number.isFinite(tcpa)) {
+		target.cpa = null;
+		target.tcpa = null;
+		return;
+	}
 
 	// in meters
 	target.cpa = Math.round(cpa);
@@ -377,8 +494,12 @@ function evaluateAlarms(target, collisionProfiles) {
 		// sort closer targets to top
 		if (target.range != null && target.range > 0) {
 			// range of 0 nm increases order by 0
-			// range of 5 nm increases order by 500
-			target.order += Math.round((100 * target.range) / METERS_PER_NM);
+			// range of 5 nm increases order by 500, capped at 5000 to prevent overflow
+			const rangeAdjust = Math.min(
+				5000,
+				Math.round((100 * target.range) / METERS_PER_NM),
+			);
+			target.order += rangeAdjust;
 		}
 
 		// Future enhancement: calculate rate of closure
@@ -386,8 +507,11 @@ function evaluateAlarms(target, collisionProfiles) {
 
 		// sort targets with no range to bottom
 		if (target.range == null) {
-			target.order += 99999;
+			target.order += 10000;
 		}
+
+		// Clamp final order to prevent any overflow issues
+		target.order = Math.max(-99999, Math.min(99999, target.order));
 	} catch (err) {
 		console.error("error in evaluateAlarms", err.message, err);
 	}

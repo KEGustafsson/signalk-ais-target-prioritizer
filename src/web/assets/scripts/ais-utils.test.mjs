@@ -1,7 +1,128 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { updateDerivedData, toRadians, toDegrees } from "./ais-utils.mjs";
+import {
+	processDelta,
+	updateDerivedData,
+	toRadians,
+	toDegrees,
+} from "./ais-utils.mjs";
 
 describe("ais-utils", () => {
+	describe("processDelta", () => {
+		it("should process a valid delta and add target to map", () => {
+			const targets = new Map();
+			const delta = {
+				context: "vessels.urn:mrn:imo:mmsi:123456789",
+				updates: [
+					{
+						timestamp: "2024-01-01T00:00:00Z",
+						values: [
+							{ path: "", value: { name: "TEST VESSEL" } },
+							{
+								path: "navigation.position",
+								value: { latitude: 39.0, longitude: -75.0 },
+							},
+						],
+					},
+				],
+			};
+
+			const mmsi = processDelta(delta, targets);
+
+			expect(mmsi).toBe("123456789");
+			expect(targets.has("123456789")).toBe(true);
+			expect(targets.get("123456789").name).toBe("TEST VESSEL");
+			expect(targets.get("123456789").latitude).toBe(39.0);
+		});
+
+		it("should return null for delta without context", () => {
+			const targets = new Map();
+			const delta = { updates: [] };
+
+			const mmsi = processDelta(delta, targets);
+
+			expect(mmsi).toBeNull();
+		});
+
+		it("should return null for invalid MMSI", () => {
+			const targets = new Map();
+			const delta = {
+				context: "vessels.urn:mrn:invalid",
+				updates: [],
+			};
+
+			const mmsi = processDelta(delta, targets);
+
+			expect(mmsi).toBeNull();
+		});
+
+		it("should update existing target", () => {
+			const targets = new Map();
+			targets.set("123456789", { mmsi: "123456789", name: "OLD NAME", sog: 0, cog: 0 });
+
+			const delta = {
+				context: "vessels.urn:mrn:imo:mmsi:123456789",
+				updates: [
+					{
+						timestamp: "2024-01-01T00:00:00Z",
+						values: [{ path: "", value: { name: "NEW NAME" } }],
+					},
+				],
+			};
+
+			processDelta(delta, targets);
+
+			expect(targets.get("123456789").name).toBe("NEW NAME");
+		});
+
+		it("should handle navigation data", () => {
+			const targets = new Map();
+			const delta = {
+				context: "vessels.urn:mrn:imo:mmsi:123456789",
+				updates: [
+					{
+						timestamp: "2024-01-01T00:00:00Z",
+						values: [
+							{ path: "navigation.speedOverGround", value: 5.14 },
+							{ path: "navigation.courseOverGroundTrue", value: 1.57 },
+							{ path: "navigation.headingTrue", value: 1.57 },
+						],
+					},
+				],
+			};
+
+			processDelta(delta, targets);
+
+			expect(targets.get("123456789").sog).toBe(5.14);
+			expect(targets.get("123456789").cog).toBe(1.57);
+			expect(targets.get("123456789").hdg).toBe(1.57);
+		});
+
+		it("should handle ATON data", () => {
+			const targets = new Map();
+			const delta = {
+				context: "atons.urn:mrn:imo:mmsi:991234567",
+				updates: [
+					{
+						timestamp: "2024-01-01T00:00:00Z",
+						values: [
+							{ path: "atonType", value: { id: 1, name: "Buoy" } },
+							{ path: "offPosition", value: true },
+							{ path: "virtual", value: false },
+						],
+					},
+				],
+			};
+
+			processDelta(delta, targets);
+
+			expect(targets.get("991234567").typeId).toBe(1);
+			expect(targets.get("991234567").type).toBe("Buoy");
+			expect(targets.get("991234567").isOffPosition).toBe(1);
+			expect(targets.get("991234567").isVirtual).toBe(0);
+			expect(targets.get("991234567").status).toBe("default");
+		});
+	});
+
 	describe("toRadians / toDegrees", () => {
 		it("should convert degrees to radians", () => {
 			expect(toRadians(0)).toBe(0);
@@ -432,6 +553,118 @@ describe("ais-utils", () => {
 			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
 
 			expect(selfTarget.longitudeFormatted).toMatch(/W.*075°/);
+		});
+	});
+
+	describe("Edge cases", () => {
+		const TARGET_MAX_AGE = 30 * 60;
+		const collisionProfiles = {
+			current: "harbor",
+			harbor: {
+				warning: { cpa: 0.5, tcpa: 600, speed: 0.5 },
+				danger: { cpa: 0.1, tcpa: 300, speed: 3 },
+				guard: { range: 0, speed: 0 },
+			},
+		};
+
+		function createTarget(overrides = {}) {
+			return {
+				mmsi: "123456789",
+				latitude: 39.0,
+				longitude: -75.0,
+				sog: 0,
+				cog: 0,
+				lastSeenDate: new Date(),
+				...overrides,
+			};
+		}
+
+		it("should handle null/undefined sog and cog", () => {
+			const targets = new Map();
+			const selfTarget = createTarget({
+				mmsi: "000000001",
+				sog: null,
+				cog: undefined,
+			});
+			const otherTarget = createTarget({
+				mmsi: "123456789",
+				sog: null,
+				cog: null,
+			});
+
+			targets.set("000000001", selfTarget);
+			targets.set("123456789", otherTarget);
+
+			// Should not throw
+			expect(() => {
+				updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+			}).not.toThrow();
+
+			// Should have valid formatted values
+			expect(otherTarget.sogFormatted).toBe("---");
+		});
+
+		it("should handle polar latitudes (near 90 degrees)", () => {
+			const targets = new Map();
+			const selfTarget = createTarget({
+				mmsi: "000000001",
+				latitude: 89.95, // Near North Pole
+				longitude: 10, // Non-zero to pass validation
+			});
+			const otherTarget = createTarget({
+				mmsi: "123456789",
+				latitude: 89.9,
+				longitude: 15,
+			});
+
+			targets.set("000000001", selfTarget);
+			targets.set("123456789", otherTarget);
+
+			// Should not throw or produce NaN
+			expect(() => {
+				updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+			}).not.toThrow();
+
+			expect(otherTarget.range).toBeDefined();
+			expect(Number.isFinite(otherTarget.range)).toBe(true);
+		});
+
+		it("should clamp order values to prevent overflow", () => {
+			const targets = new Map();
+			const selfTarget = createTarget({ mmsi: "000000001" });
+			const farTarget = createTarget({
+				mmsi: "123456789",
+				latitude: 50.0, // Very far away
+				longitude: -50.0,
+			});
+
+			targets.set("000000001", selfTarget);
+			targets.set("123456789", farTarget);
+
+			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+
+			// Order should be clamped
+			expect(farTarget.order).toBeLessThanOrEqual(99999);
+			expect(farTarget.order).toBeGreaterThanOrEqual(-99999);
+		});
+
+		it("should handle targets with missing position data", () => {
+			const targets = new Map();
+			const selfTarget = createTarget({ mmsi: "000000001" });
+			const invalidTarget = createTarget({
+				mmsi: "123456789",
+				latitude: null,
+				longitude: null,
+			});
+
+			targets.set("000000001", selfTarget);
+			targets.set("123456789", invalidTarget);
+
+			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+
+			expect(invalidTarget.isValid).toBe(false);
+			expect(invalidTarget.range).toBeNull();
+			expect(invalidTarget.bearing).toBeNull();
 		});
 	});
 });

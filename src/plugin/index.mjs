@@ -3,7 +3,10 @@ import path from "node:path";
 import defaultCollisionProfiles from "../web/assets/defaultCollisionProfiles.json" with {
 	type: "json",
 };
-import * as aisUtils from "../web/assets/scripts/ais-utils.mjs";
+import {
+	processDelta as sharedProcessDelta,
+	updateDerivedData,
+} from "../web/assets/scripts/ais-utils.mjs";
 import schema from "./schema.json" with { type: "json" };
 import * as vesper from "./vesper-xb8000-emulator.mjs";
 
@@ -127,16 +130,19 @@ export default function (app) {
 			res.json();
 		});
 
-		// PUT /plugins/${plugin.id}/setAlarmIsMuted/:mmsi/:alarmIsMuted
-		router.put("/setAlarmIsMuted/:mmsi/:alarmIsMuted", (req, res) => {
-			const mmsi = req.params.mmsi;
-			const alarmIsMuted = req.params.alarmIsMuted === "true";
+		// PUT /plugins/${plugin.id}/setAlarmIsMuted
+		router.put("/setAlarmIsMuted", (req, res) => {
+			const { mmsi, alarmIsMuted } = req.body;
+			if (!mmsi || alarmIsMuted === undefined) {
+				res.status(400).json({ error: "mmsi and alarmIsMuted required" });
+				return;
+			}
 			app.debug("setting alarmIsMuted", mmsi, alarmIsMuted);
 			if (targets.has(mmsi)) {
-				targets.get(mmsi).alarmIsMuted = alarmIsMuted;
-				res.json();
+				targets.get(mmsi).alarmIsMuted = !!alarmIsMuted;
+				res.json({ success: true });
 			} else {
-				res.status(404).end();
+				res.status(404).json({ error: "Target not found" });
 			}
 		});
 
@@ -299,122 +305,19 @@ export default function (app) {
 			(subscriptionError) => {
 				app.error(`Error:${subscriptionError}`);
 			},
-			(delta) => processDelta(delta),
+			(delta) => {
+				const mmsi = sharedProcessDelta(delta, targets);
+				if (!mmsi) {
+					app.debug(
+						"ERROR: received a delta with an invalid mmsi",
+						JSON.stringify(delta, null, "\t"),
+					);
+				}
+			},
 		);
 
 		// update data model every 1 second
 		refreshDataModelInterval = setInterval(refreshDataModel, 1000);
-	}
-
-	function processDelta(delta) {
-		const updates = delta.updates;
-		const mmsi = delta.context.slice(-9);
-
-		//app.debug('processDelta', mmsi, delta.updates.length, delta.updates[0].values[0]);
-
-		if (!mmsi || !/[0-9]{9}/.test(mmsi)) {
-			app.debug(
-				"ERROR: received a delta with an invalid mmsi",
-				JSON.stringify(delta, null, "\t"),
-			);
-			return;
-		}
-
-		let target = targets.get(mmsi);
-		if (!target) {
-			target = {
-				// initialize these to zero - because signal k may not set values if the target is stationary
-				// and we may as well start computing CPAs assuming they're stationary
-				sog: 0,
-				cog: 0,
-			};
-			target.mmsi = mmsi;
-		}
-
-		target.context = delta.context;
-
-		for (const update of updates) {
-			const values = update.values;
-			for (const value of values) {
-				//app.debug('value', value);
-
-				switch (value.path) {
-					case "":
-						if (value.value.name) {
-							target.name = value.value.name;
-						} else if (value.value.communication?.callsignVhf) {
-							target.callsign = value.value.communication.callsignVhf;
-						} else if (value.value.registrations?.imo) {
-							target.imo = value.value.registrations.imo.replace(/imo/i, "");
-						} else if (value.value.mmsi) {
-							// we expected mmsi
-						} else {
-							//app.debug('received unexpected delta on root path', delta.context, value.path, value.value);
-						}
-						break;
-					case "navigation.position":
-						target.latitude = value.value.latitude;
-						target.longitude = value.value.longitude;
-						target.lastSeenDate = new Date(update.timestamp);
-						break;
-					case "navigation.courseOverGroundTrue":
-						target.cog = value.value;
-						break;
-					case "navigation.speedOverGround":
-						target.sog = value.value;
-						break;
-					case "navigation.magneticVariation":
-						target.magvar = value.value;
-						break;
-					case "navigation.headingTrue":
-						target.hdg = value.value;
-						break;
-					case "navigation.rateOfTurn":
-						target.rot = value.value;
-						break;
-					case "design.aisShipType":
-						target.typeId = value.value.id;
-						target.type = value.value.name;
-						break;
-					case "navigation.state":
-						target.status = value.value;
-						break;
-					case "sensors.ais.class":
-						target.aisClass = value.value;
-						break;
-					case "navigation.destination.commonName":
-						target.destination = value.value;
-						break;
-					case "design.length":
-						target.length = value.value.overall;
-						break;
-					case "design.beam":
-						target.width = value.value;
-						break;
-					case "design.draft":
-						target.draft = value.value.current;
-						break;
-					case "atonType":
-						target.typeId = value.value.id;
-						target.type = value.value.name;
-						if (target.status == null) {
-							target.status = "default"; // 15 = "default"
-						}
-						break;
-					case "offPosition":
-						target.isOffPosition = value.value ? 1 : 0;
-						break;
-					case "virtual":
-						target.isVirtual = value.value ? 1 : 0;
-						break;
-
-					default:
-					//app.debug('received unexpected delta', delta.context, value.path, value.value);
-				}
-			}
-		}
-
-		targets.set(mmsi, target);
 	}
 
 	async function refreshDataModel() {
@@ -425,22 +328,17 @@ export default function (app) {
 
 			selfTarget = targets.get(selfMmsi);
 
-			if (aisUtils) {
-				try {
-					aisUtils.updateDerivedData(
-						targets,
-						selfTarget,
-						collisionProfiles,
-						TARGET_MAX_AGE,
-					);
-				} catch (error) {
-					app.debug(error); // we use app.debug rather than app.error so that the user can filter these out of the log
-					app.setPluginError(error.message);
-					sendNotification("alarm", error.message);
-					return;
-				}
-			} else {
-				app.debug("aisUtils not ready...");
+			try {
+				updateDerivedData(
+					targets,
+					selfTarget,
+					collisionProfiles,
+					TARGET_MAX_AGE,
+				);
+			} catch (error) {
+				app.debug(error); // we use app.debug rather than app.error so that the user can filter these out of the log
+				app.setPluginError(error.message);
+				sendNotification("alarm", error.message);
 				return;
 			}
 

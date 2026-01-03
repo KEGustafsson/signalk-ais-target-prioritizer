@@ -3,6 +3,7 @@ const METERS_PER_NM = 1852;
 const COURSE_PROJECTION_MINUTES = 10;
 const AGE_OUT_OLD_TARGETS = true;
 const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
+const GPS_STALE_WARNING_SECONDS = 30; // warn if no GPS position for this long
 const SHOW_ALARMS_INTERVAL = 60 * 1000; // show alarms every 60 seconds
 const PLUGIN_ID = "signalk-ais-target-prioritizer";
 const USE_WEBSOCKET_STREAMING = true; // Use WebSocket streaming instead of polling
@@ -18,7 +19,12 @@ import defaultCollisionProfiles from "../defaultCollisionProfiles.json";
 import hornMp3Url from "../horn.mp3";
 import pmtilesUrl from "../ne_10m_land.pmtiles?url&no-inline";
 import * as aisIons from "./ais-icons.mjs";
-import { toDegrees, toRadians, updateDerivedData } from "./ais-utils.mjs";
+import {
+	processDelta,
+	toDegrees,
+	toRadians,
+	updateDerivedData,
+} from "./ais-utils.mjs";
 import * as targetSvgs from "./ship-icons.mjs";
 
 const noSleep = new NoSleep();
@@ -45,6 +51,9 @@ let lastAlarmTime;
 let tooltipList = [];
 let sortTableBy = "priority";
 let signalkWebSocket = null;
+let wsReconnectAttempts = 0;
+const WS_RECONNECT_BASE_DELAY = 1000; // Start with 1 second
+const WS_RECONNECT_MAX_DELAY = 30000; // Max 30 seconds
 
 const blueLayerGroup = L.layerGroup();
 //blueLayerGroup.className = 'blueStuff';
@@ -523,8 +532,7 @@ async function saveCollisionProfiles() {
 }
 
 function showError(message) {
-	//document.getElementById("errorMessage").textContent = message;
-	document.getElementById("errorMessage").innerHTML = message;
+	document.getElementById("errorMessage").textContent = message;
 	bsModalAlert.show();
 }
 
@@ -754,6 +762,7 @@ function connectToSignalKStream() {
 
 	signalkWebSocket.onopen = () => {
 		console.log("SignalK WebSocket connected");
+		wsReconnectAttempts = 0; // Reset backoff on successful connection
 
 		// Subscribe to vessel and aton data
 		const subscription = {
@@ -781,7 +790,7 @@ function connectToSignalKStream() {
 		try {
 			const delta = JSON.parse(event.data);
 			if (delta.updates) {
-				processDelta(delta);
+				handleDelta(delta);
 			}
 		} catch (error) {
 			console.error("Error processing WebSocket message:", error);
@@ -793,91 +802,21 @@ function connectToSignalKStream() {
 	};
 
 	signalkWebSocket.onclose = () => {
-		console.log("SignalK WebSocket closed, reconnecting in 5 seconds...");
-		setTimeout(connectToSignalKStream, 5000);
+		wsReconnectAttempts++;
+		const delay = Math.min(
+			WS_RECONNECT_BASE_DELAY * Math.pow(2, wsReconnectAttempts - 1),
+			WS_RECONNECT_MAX_DELAY,
+		);
+		console.log(
+			`SignalK WebSocket closed, reconnecting in ${delay / 1000} seconds (attempt ${wsReconnectAttempts})...`,
+		);
+		setTimeout(connectToSignalKStream, delay);
 	};
 }
 
-// Process delta messages from WebSocket stream
-function processDelta(delta) {
-	if (!delta.context) return;
-
-	const mmsi = delta.context.slice(-9);
-	if (!mmsi || !/[0-9]{9}/.test(mmsi)) return;
-
-	let target = targets.get(mmsi);
-	if (!target) {
-		target = { sog: 0, cog: 0, mmsi: mmsi };
-	}
-	target.context = delta.context;
-
-	for (const update of delta.updates) {
-		if (!update.values) continue;
-
-		for (const value of update.values) {
-			switch (value.path) {
-				case "":
-					if (value.value.name) target.name = value.value.name;
-					else if (value.value.communication?.callsignVhf)
-						target.callsign = value.value.communication.callsignVhf;
-					else if (value.value.registrations?.imo)
-						target.imo = value.value.registrations.imo.replace(/imo/i, "");
-					break;
-				case "navigation.position":
-					target.latitude = value.value.latitude;
-					target.longitude = value.value.longitude;
-					target.lastSeenDate = new Date(update.timestamp);
-					break;
-				case "navigation.courseOverGroundTrue":
-					target.cog = value.value;
-					break;
-				case "navigation.speedOverGround":
-					target.sog = value.value;
-					break;
-				case "navigation.headingTrue":
-					target.hdg = value.value;
-					break;
-				case "navigation.rateOfTurn":
-					target.rot = value.value;
-					break;
-				case "design.aisShipType":
-					target.typeId = value.value.id;
-					target.type = value.value.name;
-					break;
-				case "navigation.state":
-					target.status = value.value;
-					break;
-				case "sensors.ais.class":
-					target.aisClass = value.value;
-					break;
-				case "navigation.destination.commonName":
-					target.destination = value.value;
-					break;
-				case "design.length":
-					target.length = value.value.overall;
-					break;
-				case "design.beam":
-					target.beam = value.value;
-					break;
-				case "design.draft":
-					target.draft = value.value.current;
-					break;
-				case "atonType":
-					target.typeId = value.value.id;
-					target.type = value.value.name;
-					if (target.status == null) target.status = "default";
-					break;
-				case "offPosition":
-					target.isOffPosition = value.value ? 1 : 0;
-					break;
-				case "virtual":
-					target.isVirtual = value.value ? 1 : 0;
-					break;
-			}
-		}
-	}
-
-	targets.set(mmsi, target);
+// Process delta messages from WebSocket stream - uses shared function from ais-utils.mjs
+function handleDelta(delta) {
+	processDelta(delta, targets);
 }
 
 // Update loop for streaming mode (no data fetching, just UI updates)
@@ -916,7 +855,7 @@ function updateLoop() {
 			showAlarms();
 		}
 
-		if (selfTarget?.lastSeen > 20) {
+		if (selfTarget?.lastSeen > GPS_STALE_WARNING_SECONDS) {
 			console.error(
 				`No GPS position received for more than ${selfTarget.lastSeen} seconds`,
 			);
@@ -925,13 +864,9 @@ function updateLoop() {
 		}
 
 		// display performance metrics
-		let layers = 0;
-		map.eachLayer(() => {
-			layers++;
-		});
 		const updateTimeInMillisecs = Date.now() - startTime.getTime();
 		map.attributionControl.setPrefix(
-			`${updateTimeInMillisecs} msecs / ${layers} layers (streaming)`,
+			`${updateTimeInMillisecs} ms / ${targets.size} targets (streaming)`,
 		);
 	} catch (error) {
 		console.error("Error in updateLoop:", error);
@@ -986,7 +921,7 @@ async function refresh() {
 			showAlarms();
 		}
 
-		if (selfTarget.lastSeen > 20) {
+		if (selfTarget.lastSeen > GPS_STALE_WARNING_SECONDS) {
 			console.error(
 				`No GPS position received for more than ${selfTarget.lastSeen} seconds`,
 			);
@@ -994,13 +929,9 @@ async function refresh() {
                 SignalK server and that the SignalK server has a position for your vessel.`);
 		}
 
-		let layers = 0;
-		map.eachLayer(() => {
-			layers++;
-		});
 		const updateTimeInMillisecs = Date.now() - startTime.getTime();
 		map.attributionControl.setPrefix(
-			`${updateTimeInMillisecs} msecs / ${layers} layers`,
+			`${updateTimeInMillisecs} ms / ${targets.size} targets`,
 		);
 	} catch (error) {
 		console.error("Error in refresh:", error);
@@ -1033,7 +964,8 @@ function showAlarms() {
 	});
 
 	if (targetsWithAlarms.length > 0) {
-		document.getElementById("alarmDiv").innerHTML = " ";
+		const alarmDiv = document.getElementById("alarmDiv");
+		alarmDiv.textContent = ""; // Clear safely
 		targetsWithAlarms.forEach((target) => {
 			let message = `${target.name} - ${target.alarmType.toUpperCase()} - `;
 			if (target.alarmType.includes("cpa")) {
@@ -1041,8 +973,11 @@ function showAlarms() {
 			} else {
 				message += `${target.rangeFormatted}`;
 			}
-			document.getElementById("alarmDiv").innerHTML +=
-				`<div class="alert alert-danger" role="alert">${message}</div>`;
+			const alertDiv = document.createElement("div");
+			alertDiv.className = "alert alert-danger";
+			alertDiv.setAttribute("role", "alert");
+			alertDiv.textContent = message;
+			alarmDiv.appendChild(alertDiv);
 		});
 		bsModalAlarm.show();
 		new Audio(hornMp3Url).play();
@@ -1085,11 +1020,13 @@ async function handleButtonMuteToggle() {
 		target.alarmIsMuted,
 	);
 
-	// PUT /plugins/${PLUGIN_ID}/setAlarmIsMuted/:mmsi/:alarmIsMuted
-	await fetch(
-		`/plugins/${PLUGIN_ID}/setAlarmIsMuted/${target.mmsi}/${target.alarmIsMuted}`,
-		{ credentials: "include", method: "PUT" },
-	);
+	// PUT /plugins/${PLUGIN_ID}/setAlarmIsMuted
+	await fetch(`/plugins/${PLUGIN_ID}/setAlarmIsMuted`, {
+		credentials: "include",
+		method: "PUT",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ mmsi: target.mmsi, alarmIsMuted: target.alarmIsMuted }),
+	});
 }
 
 function updateButtonMuteToggleIcon(target) {
@@ -1103,12 +1040,20 @@ function updateButtonMuteToggleIcon(target) {
 }
 
 function showAlert(message, type) {
-	alertPlaceholder.innerHTML = [
-		`<div class="alert alert-${type} alert-dismissible" role="alert">`,
-		`   <div>${message}</div>`,
-		'   <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>',
-		"</div>",
-	].join("");
+	alertPlaceholder.textContent = ""; // Clear safely
+	const alertDiv = document.createElement("div");
+	alertDiv.className = `alert alert-${type} alert-dismissible`;
+	alertDiv.setAttribute("role", "alert");
+	const messageDiv = document.createElement("div");
+	messageDiv.textContent = message;
+	alertDiv.appendChild(messageDiv);
+	const closeButton = document.createElement("button");
+	closeButton.type = "button";
+	closeButton.className = "btn-close";
+	closeButton.setAttribute("data-bs-dismiss", "alert");
+	closeButton.setAttribute("aria-label", "Close");
+	alertDiv.appendChild(closeButton);
+	alertPlaceholder.appendChild(alertDiv);
 }
 
 // get vessel data into an easier to access data model
@@ -1305,24 +1250,6 @@ function updateUI() {
 function updateTableOfTargets() {
 	const targetsArray = Array.from(targets.values());
 
-	// NOTE - For testing table column widths
-	// targetsArray.push({
-	// 	mmsi: "333333333",
-	// 	name: "ADRIATIC HIGHWAY",
-	// 	isValid: true,
-	// 	cpa: 99999,
-	// 	tcpa: 99999,
-	// 	range: 99999,
-	// 	order: 99999,
-	// 	alarmState: null,
-	// 	cpaFormatted: "99.9 NM",
-	// 	tcpaFormatted: "99:99:99",
-	// 	rangeFormatted: "99.99 NM",
-	// 	bearingFormatted: "999 T",
-	// 	sogFormatted: "99.9 kn",
-	// 	cogFormatted: "999 T",
-	// });
-
 	targetsArray.sort((a, b) => {
 		try {
 			if (sortTableBy === "tcpa") {
@@ -1342,37 +1269,59 @@ function updateTableOfTargets() {
 		}
 	});
 
-	let tableBody = "";
+	const fragment = document.createDocumentFragment();
 	let rowCount = 0;
 
 	for (const target of targetsArray) {
 		if (target.mmsi !== selfMmsi && target.isValid) {
-			tableBody += `
-                <tr class="${
-									target.alarmState === "danger"
-										? "table-danger"
-										: target.alarmState === "warning"
-											? "table-warning"
-											: ""
-								}" data-mmsi="${target.mmsi}">
-					<td scope="row">
-						${getTargetSvg(target)}
-					</td>
-					<th>
-						${target.name} ${target.alarmIsMuted ? '<i class="bi bi-volume-mute-fill"></i>' : ""}
-					</th>
-					<td class="text-end">${target.bearingFormatted}</td>
-					<td class="text-end">${target.rangeFormatted}</td>
-					<td class="text-end">${target.sogFormatted}</td>
-					<td class="text-end">${target.cpa ? target.cpaFormatted : ""}</td>
-					<td class="text-end">${target.cpa ? target.tcpaFormatted : ""}</td>
-                </tr>`;
+			const tr = document.createElement("tr");
+			if (target.alarmState === "danger") {
+				tr.className = "table-danger";
+			} else if (target.alarmState === "warning") {
+				tr.className = "table-warning";
+			}
+			tr.dataset.mmsi = target.mmsi;
+
+			// Icon cell
+			const iconTd = document.createElement("td");
+			iconTd.setAttribute("scope", "row");
+			iconTd.innerHTML = getTargetSvg(target); // SVG content is safe (from our code)
+			tr.appendChild(iconTd);
+
+			// Name cell
+			const nameTh = document.createElement("th");
+			nameTh.textContent = target.name;
+			if (target.alarmIsMuted) {
+				const muteIcon = document.createElement("i");
+				muteIcon.className = "bi bi-volume-mute-fill";
+				nameTh.appendChild(document.createTextNode(" "));
+				nameTh.appendChild(muteIcon);
+			}
+			tr.appendChild(nameTh);
+
+			// Data cells
+			const cells = [
+				target.bearingFormatted,
+				target.rangeFormatted,
+				target.sogFormatted,
+				target.cpa ? target.cpaFormatted : "",
+				target.cpa ? target.tcpaFormatted : "",
+			];
+			for (const cellText of cells) {
+				const td = document.createElement("td");
+				td.className = "text-end";
+				td.textContent = cellText;
+				tr.appendChild(td);
+			}
+
+			fragment.appendChild(tr);
 			rowCount++;
-			// <td>${target.order}</td>
 		}
 	}
 
-	document.getElementById("tableOfTargetsBody").innerHTML = tableBody;
+	const tableBody = document.getElementById("tableOfTargetsBody");
+	tableBody.textContent = ""; // Clear safely
+	tableBody.appendChild(fragment);
 	document.getElementById("numberOfAisTargets").textContent = rowCount;
 }
 
@@ -1626,7 +1575,10 @@ function ageOutOldTargets() {
 			}
 
 			if (boatMarkers.has(mmsi)) {
-				boatMarkers.get(mmsi).removeFrom(map);
+				const marker = boatMarkers.get(mmsi);
+				marker.unbindTooltip(); // Prevent memory leak
+				marker.off(); // Remove all event listeners
+				marker.removeFrom(map);
 				boatMarkers.delete(mmsi);
 			}
 
