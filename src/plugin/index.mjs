@@ -456,27 +456,49 @@ export default function (app) {
 
 			targets.forEach((target, mmsi) => {
 				if (options.enableDataPublishing && mmsi !== selfMmsi) {
-					pushTargetDataToSignalK(target);
+					// Only publish if target data has changed significantly
+					if (hasTargetDataChanged(target)) {
+						pushTargetDataToSignalK(target);
+						// Store last published values
+						target.lastPublishedCpa = target.cpa;
+						target.lastPublishedTcpa = target.tcpa;
+						target.lastPublishedRange = target.range;
+						target.lastPublishedBearing = target.bearing;
+						target.lastPublishedAlarmState = target.alarmState;
+					}
 				}
 
-				// publish warning/alarm notifications
-				// Note: Currently sends separate notifications per target. Could consolidate to single notification.
+				// publish warning/alarm notifications only when alarm state changes
 				if (
 					options.enableAlarmPublishing &&
 					target.alarmState &&
 					!target.alarmIsMuted
 				) {
-					const message = (
-						`${target.name || `<${target.mmsi}>`} - ` +
-						`${target.alarmType} ` +
-						`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
-					).toUpperCase();
-					if (target.alarmState === "warning") {
-						sendNotification("warn", message);
-					} else if (target.alarmState === "danger") {
-						sendNotification("alarm", message);
+					// Only send notification if alarm state or type has changed
+					const alarmStateChanged =
+						target.alarmState !== target.lastNotifiedAlarmState ||
+						target.alarmType !== target.lastNotifiedAlarmType;
+
+					if (alarmStateChanged) {
+						const message = (
+							`${target.name || `<${target.mmsi}>`} - ` +
+							`${target.alarmType} ` +
+							`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
+						).toUpperCase();
+						if (target.alarmState === "warning") {
+							sendNotification("warn", message);
+						} else if (target.alarmState === "danger") {
+							sendNotification("alarm", message);
+						}
+						// Track what we notified about
+						target.lastNotifiedAlarmState = target.alarmState;
+						target.lastNotifiedAlarmType = target.alarmType;
 					}
 					isCurrentAlarm = true;
+				} else if (target.lastNotifiedAlarmState) {
+					// Alarm was cleared or muted - reset tracking
+					target.lastNotifiedAlarmState = null;
+					target.lastNotifiedAlarmType = null;
 				}
 
 				if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
@@ -499,6 +521,65 @@ export default function (app) {
 		} catch (err) {
 			app.debug("error in refreshDataModel", err.message, err);
 		}
+	}
+
+	// Check if target data has changed enough to warrant publishing
+	function hasTargetDataChanged(target) {
+		// Always publish if never published before
+		if (target.lastPublishedCpa === undefined) {
+			return true;
+		}
+
+		// Publish if alarm state changed
+		if (target.alarmState !== target.lastPublishedAlarmState) {
+			return true;
+		}
+
+		// Publish if CPA changed by more than 10 meters
+		if (
+			target.cpa != null &&
+			target.lastPublishedCpa != null &&
+			Math.abs(target.cpa - target.lastPublishedCpa) > 10
+		) {
+			return true;
+		}
+
+		// Publish if TCPA changed by more than 5 seconds
+		if (
+			target.tcpa != null &&
+			target.lastPublishedTcpa != null &&
+			Math.abs(target.tcpa - target.lastPublishedTcpa) > 5
+		) {
+			return true;
+		}
+
+		// Publish if range changed by more than 10 meters
+		if (
+			target.range != null &&
+			target.lastPublishedRange != null &&
+			Math.abs(target.range - target.lastPublishedRange) > 10
+		) {
+			return true;
+		}
+
+		// Publish if bearing changed by more than 1 degree
+		if (
+			target.bearing != null &&
+			target.lastPublishedBearing != null &&
+			Math.abs(target.bearing - target.lastPublishedBearing) > 1
+		) {
+			return true;
+		}
+
+		// Publish if values went from null to non-null or vice versa
+		if (
+			(target.cpa == null) !== (target.lastPublishedCpa == null) ||
+			(target.tcpa == null) !== (target.lastPublishedTcpa == null)
+		) {
+			return true;
+		}
+
+		return false;
 	}
 
 	function pushTargetDataToSignalK(target) {
