@@ -17,7 +17,8 @@
 	"main": "plugin/index.cjs",
 	"type": "commonjs",
 	"scripts": {
-		"test": "echo \"Error: no test specified\" && exit 1",
+		"test": "vitest run",
+		"test:watch": "vitest",
 		"lint:check": "biome lint",
 		"lint": "biome lint --write",
 		"format:check": "biome format",
@@ -56,6 +57,7 @@
 		"@rollup/plugin-json": "^6.1.0",
 		"rollup": "^4.52.4",
 		"sass-embedded": "^1.93.2",
-		"vite": "^7.1.7"
+		"vite": "^7.1.7",
+		"vitest": "^3.2.4"
 	}
 }

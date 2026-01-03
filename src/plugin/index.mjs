@@ -10,21 +10,21 @@ import * as vesper from "./vesper-xb8000-emulator.mjs";
 const AGE_OUT_OLD_TARGETS = true;
 const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
 
-var selfMmsi;
-var selfName;
-var selfCallsign;
-var selfTypeId;
-var selfTarget;
+let selfMmsi;
+let selfName;
+let selfCallsign;
+let selfTypeId;
+let selfTarget;
 
-var targets = new Map();
-var collisionProfiles;
-var options;
+const targets = new Map();
+let collisionProfiles;
+let options;
 
 export default function (app) {
-	var plugin = {};
-	var unsubscribes = [];
+	const plugin = {};
+	let unsubscribes = [];
 
-	var refreshDataModelInterval;
+	let refreshDataModelInterval;
 
 	plugin.id = "signalk-ais-target-prioritizer";
 	plugin.name = "SignalK AIS Target Prioritizer";
@@ -64,7 +64,7 @@ export default function (app) {
 
 	plugin.stop = () => {
 		app.debug(`Stopping plugin ${plugin.id}`);
-		// unsubscribes.forEach((f) => f());
+		unsubscribes.forEach((f) => f());
 		unsubscribes = [];
 		if (refreshDataModelInterval) {
 			clearInterval(refreshDataModelInterval);
@@ -85,7 +85,7 @@ export default function (app) {
 
 		// PUT /plugins/${plugin.id}/setCollisionProfiles
 		router.put("/setCollisionProfiles", (req, res) => {
-			var newCollisionProfiles = req.body;
+			const newCollisionProfiles = req.body;
 			app.debug("setCollisionProfiles", newCollisionProfiles);
 			// do some basic validation to ensure we have some real config data before saving it
 			if (
@@ -109,8 +109,8 @@ export default function (app) {
 			res.json(collisionProfiles);
 		});
 
-		// GET /plugins/${plugin.id}/muteAllAlarms
-		router.get("/muteAllAlarms", (_req, res) => {
+		// POST /plugins/${plugin.id}/muteAllAlarms
+		router.post("/muteAllAlarms", (_req, res) => {
 			app.debug("muteAllAlarms");
 			targets.forEach((target, mmsi) => {
 				if (target.alarmState === "danger" && !target.alarmIsMuted) {
@@ -127,10 +127,10 @@ export default function (app) {
 			res.json();
 		});
 
-		// GET /plugins/${plugin.id}/setAlarmIsMuted/:mmsi/:alarmIsMuted
-		router.get("/setAlarmIsMuted/:mmsi/:alarmIsMuted", (req, res) => {
-			var mmsi = req.params.mmsi;
-			var alarmIsMuted = req.params.alarmIsMuted === "true";
+		// PUT /plugins/${plugin.id}/setAlarmIsMuted/:mmsi/:alarmIsMuted
+		router.put("/setAlarmIsMuted/:mmsi/:alarmIsMuted", (req, res) => {
+			const mmsi = req.params.mmsi;
+			const alarmIsMuted = req.params.alarmIsMuted === "true";
 			app.debug("setting alarmIsMuted", mmsi, alarmIsMuted);
 			if (targets.has(mmsi)) {
 				targets.get(mmsi).alarmIsMuted = alarmIsMuted;
@@ -148,7 +148,7 @@ export default function (app) {
 
 		// GET /plugins/${plugin.id}/getTarget/:mmsi
 		router.get("/getTarget/:mmsi", (req, res) => {
-			var mmsi = req.params.mmsi;
+			const mmsi = req.params.mmsi;
 			app.debug("getTarget", mmsi);
 			if (targets.has(mmsi)) {
 				res.json(targets.get(mmsi));
@@ -180,25 +180,25 @@ export default function (app) {
 			}
 		} catch (err) {
 			app.error("Error reading collisionProfiles.json:", err);
-			throw new Error("Error reading collisionProfiles.json:", err);
+			throw err;
 		}
 	}
 
 	function saveCollisionProfiles() {
 		app.debug("saving ", collisionProfiles);
 
-		var dataDirPath = app.getDataDirPath();
+		const dataDirPath = app.getDataDirPath();
 
 		if (!fs.existsSync(dataDirPath)) {
 			try {
 				fs.mkdirSync(dataDirPath, { recursive: true });
 			} catch (err) {
 				app.error("Error creating dataDirPath:", err);
-				throw new Error("Error creating dataDirPath:", err);
+				throw err;
 			}
 		}
 
-		var collisionProfilesPath = path.join(
+		const collisionProfilesPath = path.join(
 			dataDirPath,
 			"collisionProfiles.json",
 		);
@@ -210,7 +210,7 @@ export default function (app) {
 			);
 		} catch (err) {
 			app.error("Error writing collisionProfiles.json:", err);
-			throw new Error("Error writing collisionProfiles.json:", err);
+			throw err;
 		}
 	}
 
@@ -228,7 +228,7 @@ export default function (app) {
 		// atons.*
 		// vessels.*
 		// vessels.self
-		var localSubscription = {
+		const localSubscription = {
 			context: "*", // we need both vessels and atons
 			subscribe: [
 				{
@@ -307,8 +307,8 @@ export default function (app) {
 	}
 
 	function processDelta(delta) {
-		var updates = delta.updates;
-		var mmsi = delta.context.slice(-9);
+		const updates = delta.updates;
+		const mmsi = delta.context.slice(-9);
 
 		//app.debug('processDelta', mmsi, delta.updates.length, delta.updates[0].values[0]);
 
@@ -320,7 +320,7 @@ export default function (app) {
 			return;
 		}
 
-		var target = targets.get(mmsi);
+		let target = targets.get(mmsi);
 		if (!target) {
 			target = {
 				// initialize these to zero - because signal k may not set values if the target is stationary
@@ -460,7 +460,7 @@ export default function (app) {
 				}
 
 				// publish warning/alarm notifications
-				// FIXME - should we send 1 notification for all targets? or separate notifications for each target?
+				// Note: Currently sends separate notifications per target. Could consolidate to single notification.
 				if (
 					options.enableAlarmPublishing &&
 					target.alarmState &&
@@ -527,7 +527,7 @@ export default function (app) {
 
 	function sendNotification(state, message) {
 		app.debug("sendNotification", state, message);
-		var delta = {
+		const delta = {
 			updates: [
 				{
 					values: [
