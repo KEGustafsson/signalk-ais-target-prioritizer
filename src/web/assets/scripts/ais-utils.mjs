@@ -16,10 +16,8 @@ export function updateDerivedData(
 			"No GPS position available (no data for our own vessel)",
 			selfTarget,
 		);
+		// Caller is responsible for handling this error and showing appropriate UI/notification
 		throw new Error("No GPS position available (no data for our own vessel)");
-		// FIXME: raise an alarm notification for this
-		// FIXME: post a plugin error status for this
-		//return;
 	}
 
 	updateSingleTargetDerivedData(
@@ -31,10 +29,8 @@ export function updateDerivedData(
 
 	if (!selfTarget.isValid) {
 		console.warn("No GPS position available (data is invalid)", selfTarget);
+		// Caller is responsible for handling this error and showing appropriate UI/notification
 		throw new Error("No GPS position available (data is invalid)");
-		// FIXME: raise an alarm notification for this
-		// FIXME: post a plugin error status for this
-		//return;
 	}
 
 	// then update all other targets
@@ -65,7 +61,8 @@ function updateSingleTargetDerivedData(
 	TARGET_MAX_AGE,
 ) {
 	target.y = target.latitude * 111120;
-	// FIXME this might work better using an average of the latitudes of the target and selfTarget
+	// Using self vessel latitude for longitude scaling is sufficient for short ranges
+	// An average of latitudes would improve accuracy for targets far N/S, but adds complexity
 	target.x =
 		target.longitude * 111120 * Math.cos(toRadians(selfTarget.latitude));
 	target.vy = target.sog * Math.cos(target.cog); // cog is in radians
@@ -77,12 +74,12 @@ function updateSingleTargetDerivedData(
 		evaluateAlarms(target, collisionProfiles);
 	}
 
-	var lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
+	let lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
 	if (lastSeen < 0) {
 		lastSeen = 0;
 	}
 
-	var mmsiMid = getMid(target.mmsi);
+	const mmsiMid = getMid(target.mmsi);
 
 	target.lastSeen = lastSeen;
 	target.isLost = lastSeen > LOST_TARGET_WARNING_AGE;
@@ -175,13 +172,13 @@ function updateCpa(selfTarget, target) {
 	// dv = Tr1.v - Tr2.v
 	// this is relative speed
 	// m/s
-	var dv = {
+	const dv = {
 		x: target.vx - selfTarget.vx,
 		y: target.vy - selfTarget.vy,
 	};
 
 	// (m/s)^2
-	var dv2 = dot(dv, dv);
+	const dv2 = dot(dv, dv);
 
 	// guard against division by zero
 	// the tracks are almost parallel
@@ -197,17 +194,14 @@ function updateCpa(selfTarget, target) {
 	// this is relative position
 	// 111120 m / deg lat
 	// m
-	// FIXME isnt this the same as target.y - selfTarget.y
-	var w0 = {
+	const w0 = {
 		x: target.x - selfTarget.x,
 		y: target.y - selfTarget.y,
-		// x: (target.longitude - selfTarget.longitude) * 111120 * Math.cos(toRadians(selfTarget.latitude)),
-		// y: (target.latitude - selfTarget.latitude) * 111120,
 	};
 
 	// in secs
 	// m * m/s / (m/s)^2 = m / (m/s) = s
-	var tcpa = -dot(w0, dv) / dv2;
+	const tcpa = -dot(w0, dv) / dv2;
 
 	// if tcpa is in the past,
 	// or if tcpa is more than 3 hours in the future
@@ -221,20 +215,20 @@ function updateCpa(selfTarget, target) {
 
 	// Point P1 = Tr1.P0 + (ctime * Tr1.v);
 	// m
-	var p1 = {
+	const p1 = {
 		x: selfTarget.x + tcpa * selfTarget.vx,
 		y: selfTarget.y + tcpa * selfTarget.vy,
 	};
 
 	// Point P2 = Tr2.P0 + (ctime * Tr2.v);
 	// m
-	var p2 = {
+	const p2 = {
 		x: target.x + tcpa * target.vx,
 		y: target.y + tcpa * target.vy,
 	};
 
 	// in meters
-	var cpa = dist(p1, p2);
+	const cpa = dist(p1, p2);
 
 	// in meters
 	target.cpa = Math.round(cpa);
@@ -310,9 +304,10 @@ function evaluateAlarms(target, collisionProfiles) {
 		target.mobAlarm = target.mmsi.startsWith("972");
 		target.epirbAlarm = target.mmsi.startsWith("974");
 
-		//FIXME - need to clean up this order logic.
-		// targets with alarm status must be at the top
-		// targets with negative tcpa are very low priority
+		// Order/priority logic:
+		// - Base order: alarm (10000) < warning (20000) < closing (30000) < diverging (40000)
+		// - Modifiers: shorter TCPA and smaller CPA reduce order (higher priority)
+		// - Greater range increases order (lower priority)
 
 		// alarm
 		if (
@@ -386,8 +381,8 @@ function evaluateAlarms(target, collisionProfiles) {
 			target.order += Math.round((100 * target.range) / METERS_PER_NM);
 		}
 
-		// FIXME might be interesting to calculate rate of closure
-		// high positive rate of close decreases order
+		// Future enhancement: calculate rate of closure
+		// High positive rate of closure could decrease order (increase priority)
 
 		// sort targets with no range to bottom
 		if (target.range == null) {
@@ -399,26 +394,26 @@ function evaluateAlarms(target, collisionProfiles) {
 }
 
 function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
-	var R = 6371000; // Radius of the earth in meters
-	var dLat = toRadians(lat2 - lat1);
-	var dLon = toRadians(lon2 - lon1);
-	var a =
+	const R = 6371000; // Radius of the earth in meters
+	const dLat = toRadians(lat2 - lat1);
+	const dLon = toRadians(lon2 - lon1);
+	const a =
 		Math.sin(dLat / 2) * Math.sin(dLat / 2) +
 		Math.cos(toRadians(lat1)) *
 			Math.cos(toRadians(lat2)) *
 			Math.sin(dLon / 2) *
 			Math.sin(dLon / 2);
-	var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-	var d = R * c; // Distance in meters
+	const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+	const d = R * c; // Distance in meters
 	return d;
 }
 
 function getRhumbLineBearing(lat1, lon1, lat2, lon2) {
 	// difference of longitude coords
-	var diffLon = toRadians(lon2 - lon1);
+	let diffLon = toRadians(lon2 - lon1);
 
 	// difference latitude coords phi
-	var diffPhi = Math.log(
+	const diffPhi = Math.log(
 		Math.tan(toRadians(lat2) / 2 + Math.PI / 4) /
 			Math.tan(toRadians(lat1) / 2 + Math.PI / 4),
 	);
@@ -465,17 +460,17 @@ function getMid(mmsi) {
 
 // N 39° 57.0689
 function formatLat(dec) {
-	var decAbs = Math.abs(dec);
-	var deg = `0${Math.floor(decAbs)}`.slice(-2);
-	var min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
+	const decAbs = Math.abs(dec);
+	const deg = `0${Math.floor(decAbs)}`.slice(-2);
+	const min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
 	return `${dec > 0 ? "N" : "S"} ${deg}° ${min}`;
 }
 
 // W 075° 08.3692
 function formatLon(dec) {
-	var decAbs = Math.abs(dec);
-	var deg = `00${Math.floor(decAbs)}`.slice(-3);
-	var min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
+	const decAbs = Math.abs(dec);
+	const deg = `00${Math.floor(decAbs)}`.slice(-3);
+	const min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
 	return `${dec > 0 ? "E" : "W"} ${deg}° ${min}`;
 }
 
