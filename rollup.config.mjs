@@ -7,5 +7,12 @@ export default {
 		format: "cjs",
 	},
 	plugins: [json()],
-	// external: ["node:fs"],
+	external: [
+		"node:fs",
+		"node:path",
+		"express",
+		"express-sse",
+		"lodash",
+		"node-tcp-proxy",
+	],
 };
