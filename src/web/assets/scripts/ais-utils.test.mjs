@@ -5,6 +5,7 @@ import {
 	toRadians,
 	toDegrees,
 } from "./ais-utils.mjs";
+import { TARGET_MAX_AGE } from "../../../shared/constants.mjs";
 
 describe("ais-utils", () => {
 	describe("processDelta", () => {
@@ -145,7 +146,6 @@ describe("ais-utils", () => {
 	});
 
 	describe("CPA/TCPA calculations", () => {
-		const TARGET_MAX_AGE = 30 * 60;
 		const collisionProfiles = {
 			current: "harbor",
 			harbor: {
@@ -322,7 +322,6 @@ describe("ais-utils", () => {
 	});
 
 	describe("Alarm evaluation", () => {
-		const TARGET_MAX_AGE = 30 * 60;
 		const collisionProfiles = {
 			current: "harbor",
 			harbor: {
@@ -465,7 +464,6 @@ describe("ais-utils", () => {
 	});
 
 	describe("Formatting functions", () => {
-		const TARGET_MAX_AGE = 30 * 60;
 		const collisionProfiles = {
 			current: "harbor",
 			harbor: {
@@ -557,7 +555,6 @@ describe("ais-utils", () => {
 	});
 
 	describe("Edge cases", () => {
-		const TARGET_MAX_AGE = 30 * 60;
 		const collisionProfiles = {
 			current: "harbor",
 			harbor: {

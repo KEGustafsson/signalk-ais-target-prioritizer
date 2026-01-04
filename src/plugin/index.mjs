@@ -7,11 +7,17 @@ import {
 	processDelta as sharedProcessDelta,
 	updateDerivedData,
 } from "../web/assets/scripts/ais-utils.mjs";
+import {
+	TARGET_MAX_AGE,
+	PUBLISH_THRESHOLDS,
+} from "../shared/constants.mjs";
 import schema from "./schema.json" with { type: "json" };
 import * as vesper from "./vesper-xb8000-emulator.mjs";
 
 const AGE_OUT_OLD_TARGETS = true;
-const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
+
+/** Regular expression for validating MMSI format (9 digits) */
+const MMSI_REGEX = /^[0-9]{9}$/;
 
 let selfMmsi;
 let selfName;
@@ -135,6 +141,11 @@ export default function (app) {
 			const { mmsi, alarmIsMuted } = req.body;
 			if (!mmsi || alarmIsMuted === undefined) {
 				res.status(400).json({ error: "mmsi and alarmIsMuted required" });
+				return;
+			}
+			// Validate MMSI format
+			if (typeof mmsi !== "string" || !MMSI_REGEX.test(mmsi)) {
+				res.status(400).json({ error: "Invalid MMSI format (must be 9 digits)" });
 				return;
 			}
 			app.debug("setting alarmIsMuted", mmsi, alarmIsMuted);
@@ -431,7 +442,12 @@ export default function (app) {
 		}
 	}
 
-	// Check if target data has changed enough to warrant publishing
+	/**
+	 * Check if target data has changed enough to warrant publishing.
+	 * Uses thresholds to avoid flooding SignalK with minor changes.
+	 * @param {Object} target - The target to check
+	 * @returns {boolean} - True if data should be published
+	 */
 	function hasTargetDataChanged(target) {
 		// Always publish if never published before
 		if (target.lastPublishedCpa === undefined) {
@@ -443,38 +459,38 @@ export default function (app) {
 			return true;
 		}
 
-		// Publish if CPA changed by more than 10 meters
+		// Publish if CPA changed by more than threshold
 		if (
 			target.cpa != null &&
 			target.lastPublishedCpa != null &&
-			Math.abs(target.cpa - target.lastPublishedCpa) > 10
+			Math.abs(target.cpa - target.lastPublishedCpa) > PUBLISH_THRESHOLDS.CPA_METERS
 		) {
 			return true;
 		}
 
-		// Publish if TCPA changed by more than 5 seconds
+		// Publish if TCPA changed by more than threshold
 		if (
 			target.tcpa != null &&
 			target.lastPublishedTcpa != null &&
-			Math.abs(target.tcpa - target.lastPublishedTcpa) > 5
+			Math.abs(target.tcpa - target.lastPublishedTcpa) > PUBLISH_THRESHOLDS.TCPA_SECONDS
 		) {
 			return true;
 		}
 
-		// Publish if range changed by more than 10 meters
+		// Publish if range changed by more than threshold
 		if (
 			target.range != null &&
 			target.lastPublishedRange != null &&
-			Math.abs(target.range - target.lastPublishedRange) > 10
+			Math.abs(target.range - target.lastPublishedRange) > PUBLISH_THRESHOLDS.RANGE_METERS
 		) {
 			return true;
 		}
 
-		// Publish if bearing changed by more than 1 degree
+		// Publish if bearing changed by more than threshold
 		if (
 			target.bearing != null &&
 			target.lastPublishedBearing != null &&
-			Math.abs(target.bearing - target.lastPublishedBearing) > 1
+			Math.abs(target.bearing - target.lastPublishedBearing) > PUBLISH_THRESHOLDS.BEARING_DEGREES
 		) {
 			return true;
 		}

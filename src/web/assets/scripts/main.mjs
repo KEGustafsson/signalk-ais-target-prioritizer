@@ -1,11 +1,17 @@
-const DEFAULT_MAP_ZOOM = 14; // 14 gives us 2+ NM
-const METERS_PER_NM = 1852;
-const COURSE_PROJECTION_MINUTES = 10;
+import {
+	DEFAULT_MAP_ZOOM,
+	METERS_PER_NM,
+	COURSE_PROJECTION_MINUTES,
+	TARGET_MAX_AGE,
+	GPS_STALE_WARNING_SECONDS,
+	SHOW_ALARMS_INTERVAL,
+	PLUGIN_ID,
+	WS_RECONNECT_BASE_DELAY,
+	WS_RECONNECT_MAX_DELAY,
+	STORAGE_KEYS,
+} from "../../../shared/constants.mjs";
+
 const AGE_OUT_OLD_TARGETS = true;
-const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
-const GPS_STALE_WARNING_SECONDS = 30; // warn if no GPS position for this long
-const SHOW_ALARMS_INTERVAL = 60 * 1000; // show alarms every 60 seconds
-const PLUGIN_ID = "signalk-ais-target-prioritizer";
 const USE_WEBSOCKET_STREAMING = true; // Use WebSocket streaming instead of polling
 
 import * as bootstrap from "bootstrap";
@@ -52,11 +58,8 @@ let tooltipList = [];
 let sortTableBy = "priority";
 let signalkWebSocket = null;
 let wsReconnectAttempts = 0;
-const WS_RECONNECT_BASE_DELAY = 1000; // Start with 1 second
-const WS_RECONNECT_MAX_DELAY = 30000; // Max 30 seconds
 
 const blueLayerGroup = L.layerGroup();
-//blueLayerGroup.className = 'blueStuff';
 
 const bsModalAlert = new bootstrap.Modal("#modalAlert");
 const bsModalAlarm = new bootstrap.Modal("#modalAlarm");
@@ -87,8 +90,11 @@ if (!collisionProfiles.current) {
 document.getElementById("selectActiveProfile").value =
 	collisionProfiles.current;
 document.getElementById("checkNoSleep").checked =
-	localStorage.getItem("checkNoSleep") === "true";
+	localStorage.getItem(STORAGE_KEYS.NO_SLEEP) === "true";
+document.getElementById("checkDarkMode").checked =
+	localStorage.getItem(STORAGE_KEYS.DARK_MODE) === "true";
 configureNoSleep();
+applyColorMode();
 
 const charts = await getHttpResponse("/signalk/v1/api/resources/charts", {
 	throwErrors: false,
@@ -212,8 +218,8 @@ L.easyButton("bi bi-gear-fill", () => {
 }).addTo(map);
 
 // reload last used baselayer/overlay
-let baselayer = localStorage.getItem("baselayer");
-const overlay = localStorage.getItem("overlay");
+let baselayer = localStorage.getItem(STORAGE_KEYS.BASE_LAYER);
+const overlay = localStorage.getItem(STORAGE_KEYS.OVERLAY);
 if (!baseMaps[baselayer]) {
 	baselayer = "OpenStreetMap";
 }
@@ -347,7 +353,6 @@ document
 	.getElementById("buttonMuteToggle")
 	.addEventListener("click", handleButtonMuteToggle);
 
-document.getElementsByClassName("");
 // save config when offcanvasEditProfiles is closed
 offcanvasEditProfiles.addEventListener("hide.bs.offcanvas", () => {
 	saveCollisionProfiles();
@@ -409,6 +414,7 @@ function fullscreenchangeHandler() {
 }
 
 function applyColorMode() {
+	localStorage.setItem(STORAGE_KEYS.DARK_MODE, checkDarkMode.checked);
 	if (checkDarkMode.checked) {
 		// dark mode
 		document.documentElement.setAttribute("data-bs-theme", "dark");
@@ -433,21 +439,21 @@ function configureNoSleep() {
 	} else {
 		noSleep.disable();
 	}
-	localStorage.setItem("checkNoSleep", checkNoSleep.checked);
+	localStorage.setItem(STORAGE_KEYS.NO_SLEEP, checkNoSleep.checked);
 }
 
 function handleBaseLayerChange(event) {
-	localStorage.setItem("baselayer", event.name);
+	localStorage.setItem(STORAGE_KEYS.BASE_LAYER, event.name);
 	applyColorMode();
 }
 
 function handleOverlayAdd(event) {
-	localStorage.setItem("overlay", event.name);
+	localStorage.setItem(STORAGE_KEYS.OVERLAY, event.name);
 	applyColorMode();
 }
 
 function handleOverlayRemove() {
-	localStorage.removeItem("overlay");
+	localStorage.removeItem(STORAGE_KEYS.OVERLAY);
 }
 
 // initialize profile edit screen on startup
@@ -508,27 +514,50 @@ function setupProfileEditView(profile) {
 	configGuardSogRange.dispatchEvent(inputEvent);
 }
 
-async function saveCollisionProfiles() {
-	console.log("*** save collisionProfiles to server", collisionProfiles);
+/** Timer for debouncing collision profile saves */
+let saveCollisionProfilesTimer = null;
+const SAVE_DEBOUNCE_MS = 500;
 
-	// /plugins/${PLUGIN_ID}/setCollisionProfiles
-	const response = await fetch(`/plugins/${PLUGIN_ID}/setCollisionProfiles`, {
-		credentials: "include",
-		method: "PUT",
-		body: JSON.stringify(collisionProfiles),
-		headers: {
-			"Content-Type": "application/json",
-		},
-	});
-	if (response.status === 401) {
-		location.href = "/admin/#/login";
+/**
+ * Saves collision profiles to the server with debouncing.
+ * Multiple rapid calls will be coalesced into a single save.
+ */
+function saveCollisionProfiles() {
+	// Clear any existing timer
+	if (saveCollisionProfilesTimer) {
+		clearTimeout(saveCollisionProfilesTimer);
 	}
-	if (!response.ok) {
-		throw new Error(
-			`Error saving collisionProfiles. Response status: ${response.status} from ${response.url}`,
-		);
-	}
-	console.log("successfully saved config", collisionProfiles);
+
+	// Set new timer to save after debounce period
+	saveCollisionProfilesTimer = setTimeout(async () => {
+		console.log("*** save collisionProfiles to server", collisionProfiles);
+
+		try {
+			const response = await fetch(
+				`/plugins/${PLUGIN_ID}/setCollisionProfiles`,
+				{
+					credentials: "include",
+					method: "PUT",
+					body: JSON.stringify(collisionProfiles),
+					headers: {
+						"Content-Type": "application/json",
+					},
+				},
+			);
+			if (response.status === 401) {
+				location.href = "/admin/#/login";
+			}
+			if (!response.ok) {
+				throw new Error(
+					`Error saving collisionProfiles. Response status: ${response.status} from ${response.url}`,
+				);
+			}
+			console.log("successfully saved config", collisionProfiles);
+		} catch (error) {
+			console.error("Error saving collision profiles:", error);
+			showError(`Error saving settings: ${error.message}`);
+		}
+	}, SAVE_DEBOUNCE_MS);
 }
 
 function showError(message) {
@@ -752,17 +781,56 @@ async function initialDataLoad() {
 	}
 }
 
+/**
+ * Updates the connection status indicator in the UI.
+ * @param {"connected" | "disconnected" | "reconnecting"} status - Connection status
+ * @param {string} [message] - Optional message to display
+ */
+function updateConnectionStatus(status, message) {
+	const statusIndicator = document.getElementById("connectionStatus");
+	if (!statusIndicator) return;
+
+	statusIndicator.classList.remove(
+		"text-success",
+		"text-danger",
+		"text-warning",
+	);
+
+	switch (status) {
+		case "connected":
+			statusIndicator.classList.add("text-success");
+			statusIndicator.innerHTML =
+				'<i class="bi bi-wifi"></i> <span class="d-none d-sm-inline">Connected</span>';
+			statusIndicator.title = "Connected to SignalK";
+			break;
+		case "disconnected":
+			statusIndicator.classList.add("text-danger");
+			statusIndicator.innerHTML =
+				'<i class="bi bi-wifi-off"></i> <span class="d-none d-sm-inline">Offline</span>';
+			statusIndicator.title = message || "Disconnected from SignalK";
+			break;
+		case "reconnecting":
+			statusIndicator.classList.add("text-warning");
+			statusIndicator.innerHTML =
+				'<i class="bi bi-arrow-repeat"></i> <span class="d-none d-sm-inline">Reconnecting...</span>';
+			statusIndicator.title = message || "Attempting to reconnect...";
+			break;
+	}
+}
+
 // Connect to SignalK WebSocket stream for real-time updates
 function connectToSignalKStream() {
 	const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const wsUrl = `${wsProtocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
 
 	console.log("Connecting to SignalK stream:", wsUrl);
+	updateConnectionStatus("reconnecting", "Connecting...");
 	signalkWebSocket = new WebSocket(wsUrl);
 
 	signalkWebSocket.onopen = () => {
 		console.log("SignalK WebSocket connected");
 		wsReconnectAttempts = 0; // Reset backoff on successful connection
+		updateConnectionStatus("connected");
 
 		// Subscribe to vessel and aton data
 		const subscription = {
@@ -799,6 +867,7 @@ function connectToSignalKStream() {
 
 	signalkWebSocket.onerror = (error) => {
 		console.error("SignalK WebSocket error:", error);
+		updateConnectionStatus("disconnected", "Connection error");
 	};
 
 	signalkWebSocket.onclose = () => {
@@ -809,6 +878,10 @@ function connectToSignalKStream() {
 		);
 		console.log(
 			`SignalK WebSocket closed, reconnecting in ${delay / 1000} seconds (attempt ${wsReconnectAttempts})...`,
+		);
+		updateConnectionStatus(
+			"reconnecting",
+			`Reconnecting in ${delay / 1000}s (attempt ${wsReconnectAttempts})`,
 		);
 		setTimeout(connectToSignalKStream, delay);
 	};
@@ -1600,7 +1673,7 @@ function boatClicked(event) {
 		closebyBoatMarkers.sort((a, b) => a.distanceInPixels - b.distanceInPixels);
 
 		const div = document.getElementById("listOfClosebyBoats");
-		div.innerHTML = "";
+		div.textContent = "";
 		let target;
 		let a;
 
@@ -1637,7 +1710,7 @@ function boatClicked(event) {
 
 function showModalSelectVesselProperties(target) {
 	updateSelectedVesselProperties(target);
-	alertPlaceholder.innerHTML = "";
+	alertPlaceholder.textContent = "";
 	bsModalSelectedVesselProperties.show();
 }
 
@@ -1698,14 +1771,6 @@ function selectBoatMarker(boatMarker) {
 		return;
 	}
 
-	// clear previous blue box
-	// if (blueBoxIcon) {
-	//     blueBoxIcon.removeFrom(map);
-	//     console.log('about to remove blueCircle1', blueCircle1);
-	//     blueCircle1.removeFrom(map);
-	//     blueCircle2.removeFrom(map);
-	// }
-
 	// add blue box to selected boat marker
 	blueBoxIcon.setLatLng(boatMarker.getLatLng());
 	blueBoxIcon.addTo(map);
@@ -1726,15 +1791,12 @@ function selectBoatMarker(boatMarker) {
 	if (oldSelectedVesselMmsi) {
 		updateSingleVesselUI(targets.get(oldSelectedVesselMmsi));
 	}
-
-	// blueLayerGroup.addTo(map); // Currently adding layers individually for better control
 }
 
 function handleMapClick() {
 	blueBoxIcon.removeFrom(map);
 	blueCircle1.removeFrom(map);
 	blueCircle2.removeFrom(map);
-	//blueLayerGroup.removeFrom(map);
 
 	if (selectedVesselMmsi) {
 		// update selected vessel (remove blue):

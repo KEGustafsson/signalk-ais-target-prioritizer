@@ -1,9 +1,12 @@
 import { mmsiMidToCountry } from "./mmsi-mid-decoder.mjs";
-
-const METERS_PER_NM = 1852;
-const KNOTS_PER_M_PER_S = 1.94384;
-const LOST_TARGET_WARNING_AGE = 10 * 60; // in seconds - 10 minutes
-const TCPA_MAX_SECONDS = 3 * 3600; // Maximum TCPA to calculate (3 hours)
+import {
+	METERS_PER_NM,
+	KNOTS_PER_M_PER_S,
+	LOST_TARGET_WARNING_AGE,
+	TCPA_MAX_SECONDS,
+	PRIORITY_ORDER,
+	PRIORITY_WEIGHTS,
+} from "../../../shared/constants.mjs";
 
 /**
  * Process a SignalK delta message and update the target in the targets map.
@@ -105,6 +108,16 @@ export function processDelta(delta, targets) {
 	return mmsi;
 }
 
+/**
+ * Updates derived data for all targets (range, bearing, CPA, TCPA, alarms).
+ * This is the main calculation loop that should be called periodically (e.g., every second).
+ *
+ * @param {Map<string, Object>} targets - Map of all AIS targets keyed by MMSI
+ * @param {Object} selfTarget - The own vessel target (must have valid lat/lon)
+ * @param {Object} collisionProfiles - Collision profile configuration with thresholds
+ * @param {number} TARGET_MAX_AGE - Maximum age in seconds before a target is considered stale
+ * @throws {Error} If selfTarget is missing or has invalid position data
+ */
 export function updateDerivedData(
 	targets,
 	selfTarget,
@@ -435,22 +448,22 @@ function evaluateAlarms(target, collisionProfiles) {
 			target.epirbAlarm
 		) {
 			target.alarmState = "danger";
-			target.order = 10000;
+			target.order = PRIORITY_ORDER.DANGER;
 		}
 		// warning
 		else if (target.collisionWarning) {
 			target.alarmState = "warning";
-			target.order = 20000;
+			target.order = PRIORITY_ORDER.WARNING;
 		}
 		// no alarm/warning - but has positive tcpa (closing)
 		else if (target.tcpa != null && target.tcpa > 0) {
 			target.alarmState = null;
-			target.order = 30000;
+			target.order = PRIORITY_ORDER.CLOSING;
 		}
-		// no alarm/warning and moving away)
+		// no alarm/warning and moving away
 		else {
 			target.alarmState = null;
-			target.order = 40000;
+			target.order = PRIORITY_ORDER.DIVERGING;
 		}
 
 		const alarms = [];
@@ -470,48 +483,54 @@ function evaluateAlarms(target, collisionProfiles) {
 		// sort sooner tcpa targets to top
 		if (target.tcpa != null && target.tcpa > 0) {
 			// sort vessels with any tcpa above vessels that dont have a tcpa
-			target.order -= 1000;
-			// tcpa of 0 seconds reduces order by 1000 (this is an arbitrary weighting)
+			target.order -= PRIORITY_WEIGHTS.HAS_TCPA_BONUS;
+			// tcpa of 0 seconds reduces order by TCPA_WEIGHT
 			// tcpa of 60 minutes reduces order by 0
-			const weight = 1000;
 			target.order -= Math.max(
 				0,
-				Math.round(weight - (weight * target.tcpa) / 3600),
+				Math.round(
+					PRIORITY_WEIGHTS.TCPA_WEIGHT -
+						(PRIORITY_WEIGHTS.TCPA_WEIGHT * target.tcpa) / 3600,
+				),
 			);
 		}
 
 		// sort closer cpa targets to top
 		if (target.cpa != null && target.cpa > 0) {
-			// cpa of 0 nm reduces order by 2000 (this is an arbitrary weighting)
+			// cpa of 0 nm reduces order by CPA_WEIGHT
 			// cpa of 5 nm reduces order by 0
-			const weight = 2000;
 			target.order -= Math.max(
 				0,
-				Math.round(weight - (weight * target.cpa) / 5 / METERS_PER_NM),
+				Math.round(
+					PRIORITY_WEIGHTS.CPA_WEIGHT -
+						(PRIORITY_WEIGHTS.CPA_WEIGHT * target.cpa) / 5 / METERS_PER_NM,
+				),
 			);
 		}
 
 		// sort closer targets to top
 		if (target.range != null && target.range > 0) {
 			// range of 0 nm increases order by 0
-			// range of 5 nm increases order by 500, capped at 5000 to prevent overflow
+			// larger range increases order, capped at RANGE_WEIGHT_MAX
 			const rangeAdjust = Math.min(
-				5000,
-				Math.round((100 * target.range) / METERS_PER_NM),
+				PRIORITY_WEIGHTS.RANGE_WEIGHT_MAX,
+				Math.round(
+					(PRIORITY_WEIGHTS.RANGE_WEIGHT_PER_NM * target.range) / METERS_PER_NM,
+				),
 			);
 			target.order += rangeAdjust;
 		}
 
-		// Future enhancement: calculate rate of closure
-		// High positive rate of closure could decrease order (increase priority)
-
 		// sort targets with no range to bottom
 		if (target.range == null) {
-			target.order += 10000;
+			target.order += PRIORITY_ORDER.NO_RANGE;
 		}
 
 		// Clamp final order to prevent any overflow issues
-		target.order = Math.max(-99999, Math.min(99999, target.order));
+		target.order = Math.max(
+			PRIORITY_WEIGHTS.ORDER_MIN,
+			Math.min(PRIORITY_WEIGHTS.ORDER_MAX, target.order),
+		);
 	} catch (err) {
 		console.error("error in evaluateAlarms", err.message, err);
 	}
