@@ -579,6 +579,29 @@ describe("ais-utils", () => {
 			};
 		}
 
+		it("should throw when selfTarget is undefined", () => {
+			const targets = new Map();
+
+			expect(() => {
+				updateDerivedData(targets, undefined, collisionProfiles, TARGET_MAX_AGE);
+			}).toThrow("No GPS position available");
+		});
+
+		it("should throw when selfTarget has null latitude/longitude", () => {
+			const targets = new Map();
+			const selfTarget = createTarget({
+				mmsi: "000000001",
+				latitude: null,
+				longitude: null,
+			});
+
+			targets.set("000000001", selfTarget);
+
+			expect(() => {
+				updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+			}).toThrow("No GPS position available");
+		});
+
 		it("should handle null/undefined sog and cog", () => {
 			const targets = new Map();
 			const selfTarget = createTarget({

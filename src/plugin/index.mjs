@@ -328,6 +328,16 @@ export default function (app) {
 
 			selfTarget = targets.get(selfMmsi);
 
+			// Wait for valid self vessel data before processing
+			if (
+				!selfTarget ||
+				selfTarget.latitude == null ||
+				selfTarget.longitude == null
+			) {
+				app.setPluginStatus("Waiting for own vessel GPS position...");
+				return;
+			}
+
 			try {
 				updateDerivedData(
 					targets,
