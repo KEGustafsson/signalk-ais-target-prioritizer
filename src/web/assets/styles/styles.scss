@@ -114,3 +114,8 @@ button.easy-button-button {
   width: 7em;
   z-index: 500;
 }
+
+// Allow ETA cell to expand for full ISO timestamp
+#target\.eta {
+  white-space: nowrap;
+}
