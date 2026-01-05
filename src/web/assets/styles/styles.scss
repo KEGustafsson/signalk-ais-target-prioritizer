@@ -119,3 +119,8 @@ button.easy-button-button {
 #target\.eta {
   white-space: nowrap;
 }
+
+// Increase modal-sm width to fit ETA timestamp
+#modalSelectedVesselProperties .modal-dialog {
+  --bs-modal-width: 350px;
+}
