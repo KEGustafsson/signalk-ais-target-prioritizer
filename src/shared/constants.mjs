@@ -55,6 +55,7 @@ export const STORAGE_KEYS = {
 	OVERLAY: "ais-prioritizer-overlay",
 	NO_SLEEP: "ais-prioritizer-noSleep",
 	DARK_MODE: "ais-prioritizer-darkMode",
+	DEBUG_STREAM: "ais-prioritizer-debugStream",
 };
 
 // SignalK data change thresholds (for optimizing publish frequency)

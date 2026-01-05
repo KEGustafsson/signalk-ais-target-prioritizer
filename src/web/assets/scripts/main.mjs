@@ -93,6 +93,8 @@ document.getElementById("checkNoSleep").checked =
 	localStorage.getItem(STORAGE_KEYS.NO_SLEEP) === "true";
 document.getElementById("checkDarkMode").checked =
 	localStorage.getItem(STORAGE_KEYS.DARK_MODE) === "true";
+document.getElementById("checkDebugStream").checked =
+	localStorage.getItem(STORAGE_KEYS.DEBUG_STREAM) === "true";
 configureNoSleep();
 applyColorMode();
 
@@ -327,6 +329,13 @@ document.getElementById("checkFullScreen").addEventListener("change", () => {
 document.addEventListener("fullscreenchange", fullscreenchangeHandler);
 
 //document.addEventListener("webkitfullscreenchange", fullscreenchangeHandler);
+
+document.getElementById("checkDebugStream").addEventListener("change", () => {
+	localStorage.setItem(STORAGE_KEYS.DEBUG_STREAM, checkDebugStream.checked);
+	if (!checkDebugStream.checked) {
+		map.attributionControl.setPrefix(false);
+	}
+});
 
 document
 	.getElementById("selectProfileToEdit")
@@ -937,10 +946,12 @@ function updateLoop() {
 		}
 
 		// display performance metrics
-		const updateTimeInMillisecs = Date.now() - startTime.getTime();
-		map.attributionControl.setPrefix(
-			`${updateTimeInMillisecs} ms / ${targets.size} targets (streaming)`,
-		);
+		if (checkDebugStream.checked) {
+			const updateTimeInMillisecs = Date.now() - startTime.getTime();
+			map.attributionControl.setPrefix(
+				`${updateTimeInMillisecs} ms / ${targets.size} vessels incl. own (streaming)`,
+			);
+		}
 	} catch (error) {
 		console.error("Error in updateLoop:", error);
 	}
@@ -1002,10 +1013,12 @@ async function refresh() {
                 SignalK server and that the SignalK server has a position for your vessel.`);
 		}
 
-		const updateTimeInMillisecs = Date.now() - startTime.getTime();
-		map.attributionControl.setPrefix(
-			`${updateTimeInMillisecs} ms / ${targets.size} targets`,
-		);
+		if (checkDebugStream.checked) {
+			const updateTimeInMillisecs = Date.now() - startTime.getTime();
+			map.attributionControl.setPrefix(
+				`${updateTimeInMillisecs} ms / ${targets.size} vessels incl. own`,
+			);
+		}
 	} catch (error) {
 		console.error("Error in refresh:", error);
 	}
