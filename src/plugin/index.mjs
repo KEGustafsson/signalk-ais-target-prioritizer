@@ -519,7 +519,9 @@ export default function (app) {
 		// Publish if values went from null to non-null or vice versa
 		if (
 			(target.cpa == null) !== (target.lastPublishedCpa == null) ||
-			(target.tcpa == null) !== (target.lastPublishedTcpa == null)
+			(target.tcpa == null) !== (target.lastPublishedTcpa == null) ||
+			(target.range == null) !== (target.lastPublishedRange == null) ||
+			(target.bearing == null) !== (target.lastPublishedBearing == null)
 		) {
 			return true;
 		}
