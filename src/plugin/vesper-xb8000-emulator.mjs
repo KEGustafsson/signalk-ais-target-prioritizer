@@ -2,6 +2,13 @@ var aisUtilsPromise = import("../web/assets/scripts/ais-utils.mjs");
 let toDegrees;
 let getDistanceFromLatLonInMeters;
 let getRhumbLineBearing;
+let formatLat;
+let formatLon;
+let formatCpaNumeric;
+let formatTcpaNumeric;
+let formatSog;
+let formatCog;
+let formatFixed;
 
 import express from "express";
 
@@ -418,9 +425,9 @@ function getAlarmsXml() {
 <Name>${xmlescape(target.name) || ""}</Name>
 <COG>${formatCog(target.cog)}</COG>
 <SOG>${formatSog(target.sog)}</SOG>
-<CPA>${formatCpa(target.cpa)}</CPA>
-<TCPA>${formatTcpa(target.tcpa)}</TCPA>
-<Range>${formatCpa(target.range)}</Range>
+<CPA>${formatCpaNumeric(target.cpa)}</CPA>
+<TCPA>${formatTcpaNumeric(target.tcpa)}</TCPA>
+<Range>${formatCpaNumeric(target.range)}</Range>
 <BearingTrue>${target.bearing || ""}</BearingTrue>
 <TargetType>${target.vesperTargetType || ""}</TargetType>
 </Alarm>`;
@@ -459,10 +466,10 @@ function getTargetsXml() {
 <VesselType>${target.typeId || ""}</VesselType>
 <TargetType>${target.vesperTargetType || ""}</TargetType>
 <Order>${target.order || ""}</Order>
-<TCPA>${formatTcpa(target.tcpa)}</TCPA>
-<CPA>${formatCpa(target.cpa)}</CPA>
+<TCPA>${formatTcpaNumeric(target.tcpa)}</TCPA>
+<CPA>${formatCpaNumeric(target.cpa)}</CPA>
 <Bearing>${target.bearing || ""}</Bearing>
-<Range>${formatCpa(target.range)}</Range>
+<Range>${formatCpaNumeric(target.range)}</Range>
 <COG2>${formatCog(target.cog)}</COG2>
 <SOG>${formatSog(target.sog)}</SOG>
 <DangerState>${translateAlarmState(target.alarmState) || ""}</DangerState>
@@ -525,10 +532,10 @@ function getTargetDetailsXml(mmsi) {
 <VesselType>${target.typeId || ""}</VesselType>
 <TargetType>${target.vesperTargetType || ""}</TargetType>
 <Order>${target.order || ""}</Order>
-<TCPA>${formatTcpa(target.tcpa)}</TCPA>
-<CPA>${formatCpa(target.cpa)}</CPA>
+<TCPA>${formatTcpaNumeric(target.tcpa)}</TCPA>
+<CPA>${formatCpaNumeric(target.cpa)}</CPA>
 <Bearing>${target.bearing || ""}</Bearing>
-<Range>${formatCpa(target.range)}</Range>
+<Range>${formatCpaNumeric(target.range)}</Range>
 <COG2>${formatCog(target.cog)}</COG2>
 <SOG>${formatSog(target.sog)}</SOG>
 <DangerState>${translateAlarmState(target.alarmState) || ""}</DangerState>
@@ -1115,77 +1122,11 @@ function translateAlarmState(alarmState) {
 	return alarmState === "warning" ? "threat" : alarmState;
 }
 
-// latitudeText: 'N 39° 57.0689',
-function formatLat(dec) {
-	var decAbs = Math.abs(dec);
-	var deg = `0${Math.floor(decAbs)}`.slice(-2);
-	var min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
-	return `${dec > 0 ? "N" : "S"} ${deg}° ${min}`;
-}
-
-// longitudeText: 'W 075° 08.3692',
-function formatLon(dec) {
-	var decAbs = Math.abs(dec);
-	var deg = `00${Math.floor(decAbs)}`.slice(-3);
-	var min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
-	return `${dec > 0 ? "E" : "W"} ${deg}° ${min}`;
-}
-
-// return in knots
-function formatSog(sog) {
-	return formatFixed(sog * KNOTS_PER_M_PER_S, 1);
-}
-
-function formatCog(cog) {
-	return cog === undefined ? "" : `00${Math.round(toDegrees(cog))}`.slice(-3);
-}
-
-/**
- * Formats Rate of Turn for Vesper display.
- * SignalK provides ROT in radians per second.
- * Vesper expects display in degrees per minute.
- * @param {number} rot - Rate of turn in radians per second
- * @returns {string} - Formatted ROT string (e.g., "3°/min")
- */
+// Vesper-specific: Format Rate of Turn in degrees per minute
 function formatRot(rot) {
-	if (rot === undefined || rot === null || rot === 0) {
-		return "";
-	}
-	// Convert radians/second to degrees/minute
-	// radians/sec * (180/π) * 60 = degrees/min
+	if (rot == null || rot === 0) return "";
 	const degreesPerMinute = rot * (180 / Math.PI) * 60;
 	return `${Math.round(degreesPerMinute)}°/min`;
-}
-
-function formatCpa(cpa) {
-	return cpa === undefined || cpa === null
-		? ""
-		: formatFixed(cpa / METERS_PER_NM, 2);
-}
-
-function formatFixed(number, digits) {
-	return number === undefined ? "" : number.toFixed(digits);
-}
-
-function formatTcpa(tcpa) {
-	// returns hh:mm:ss, e.g. 01:15:23
-	if (tcpa === undefined || tcpa === null || tcpa < 0) {
-		return "";
-	}
-	// when more than 60 mins, then format hh:mm:ss
-	else if (Math.abs(tcpa) >= 3600) {
-		return (
-			(tcpa < 0 ? "-" : "") +
-			new Date(1000 * Math.abs(tcpa)).toISOString().substring(11, 19)
-		);
-	}
-	// when less than 60 mins, then format mm:ss
-	else {
-		return (
-			(tcpa < 0 ? "-" : "") +
-			new Date(1000 * Math.abs(tcpa)).toISOString().substring(14, 19)
-		);
-	}
 }
 
 function xmlescape(string, ignore) {
@@ -1274,6 +1215,13 @@ export function start(
 		toDegrees = aisUtils.toDegrees;
 		getDistanceFromLatLonInMeters = aisUtils.getDistanceFromLatLonInMeters;
 		getRhumbLineBearing = aisUtils.getRhumbLineBearing;
+		formatLat = aisUtils.formatLat;
+		formatLon = aisUtils.formatLon;
+		formatCpaNumeric = aisUtils.formatCpaNumeric;
+		formatTcpaNumeric = aisUtils.formatTcpaNumeric;
+		formatSog = aisUtils.formatSog;
+		formatCog = aisUtils.formatCog;
+		formatFixed = aisUtils.formatFixed;
 		app.debug("starting vesper emulator", collisionProfiles);
 		refreshTargetData();
 		setupHttpServer();

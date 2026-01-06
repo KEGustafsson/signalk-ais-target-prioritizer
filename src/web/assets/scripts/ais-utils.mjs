@@ -624,7 +624,8 @@ function getMid(mmsi) {
 }
 
 // N 39° 57.0689
-function formatLat(dec) {
+export function formatLat(dec) {
+	if (dec == null) return "";
 	const decAbs = Math.abs(dec);
 	const deg = `0${Math.floor(decAbs)}`.slice(-2);
 	const min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
@@ -632,30 +633,51 @@ function formatLat(dec) {
 }
 
 // W 075° 08.3692
-function formatLon(dec) {
+export function formatLon(dec) {
+	if (dec == null) return "";
 	const decAbs = Math.abs(dec);
 	const deg = `00${Math.floor(decAbs)}`.slice(-3);
 	const min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
 	return `${dec > 0 ? "E" : "W"} ${deg}° ${min}`;
 }
 
-// 1.53 NM
+// Format CPA in nautical miles - returns "1.53 NM" or "---" for display
 function formatCpa(cpa) {
-	// if cpa is null it should be returned as blank. toFixed makes it '0.00'
 	return cpa != null ? `${(cpa / METERS_PER_NM).toFixed(2)} NM` : "---";
 }
 
-// hh:mm:ss or mm:ss e.g. 01:15:23 or 51:37
+// Format CPA as number only (for Vesper XML) - returns "1.53" or ""
+export function formatCpaNumeric(cpa) {
+	return cpa != null ? (cpa / METERS_PER_NM).toFixed(2) : "";
+}
+
+// Format TCPA as hh:mm:ss or mm:ss - returns "01:15:23" or "---" for display
 function formatTcpa(tcpa) {
-	if (tcpa == null || tcpa < 0) {
-		return "---";
-	}
-	// when more than 60 mins, then format hh:mm:ss
-	else if (Math.abs(tcpa) >= 3600) {
-		return new Date(1000 * Math.abs(tcpa)).toISOString().substring(11, 19); // + ' hours'
-	}
-	// when less than 60 mins, then format mm:ss
-	else {
-		return new Date(1000 * Math.abs(tcpa)).toISOString().substring(14, 19); // + ' mins'
-	}
+	if (tcpa == null || tcpa < 0) return "---";
+	return tcpa >= 3600
+		? new Date(1000 * tcpa).toISOString().substring(11, 19)
+		: new Date(1000 * tcpa).toISOString().substring(14, 19);
+}
+
+// Format TCPA for Vesper XML - returns "01:15:23" or ""
+export function formatTcpaNumeric(tcpa) {
+	if (tcpa == null || tcpa < 0) return "";
+	return tcpa >= 3600
+		? new Date(1000 * tcpa).toISOString().substring(11, 19)
+		: new Date(1000 * tcpa).toISOString().substring(14, 19);
+}
+
+// Format SOG in knots - returns "5.2"
+export function formatSog(sog) {
+	return sog != null ? (sog * KNOTS_PER_M_PER_S).toFixed(1) : "";
+}
+
+// Format COG in degrees - returns "045"
+export function formatCog(cog) {
+	return cog != null ? `00${Math.round(toDegrees(cog))}`.slice(-3) : "";
+}
+
+// Format number with fixed decimals - returns "1.23" or ""
+export function formatFixed(num, digits) {
+	return num != null ? num.toFixed(digits) : "";
 }
