@@ -23,7 +23,7 @@ export function processDelta(delta, targets) {
 
 	let target = targets.get(mmsi);
 	if (!target) {
-		target = { sog: 0, cog: 0, mmsi: mmsi };
+		target = { sog: 0, cog: 0, mmsi: mmsi, needsRecalc: true };
 	}
 	target.context = delta.context;
 
@@ -49,12 +49,15 @@ export function processDelta(delta, targets) {
 					target.latitude = value.value.latitude;
 					target.longitude = value.value.longitude;
 					target.lastSeenDate = new Date(update.timestamp);
+					target.needsRecalc = true; // Position changed - recalculate
 					break;
 				case "navigation.courseOverGroundTrue":
 					target.cog = value.value;
+					target.needsRecalc = true; // Course changed - recalculate
 					break;
 				case "navigation.speedOverGround":
 					target.sog = value.value;
+					target.needsRecalc = true; // Speed changed - recalculate
 					break;
 				case "navigation.magneticVariation":
 					target.magvar = value.value;
@@ -168,7 +171,11 @@ export function toDegrees(v) {
 	return (v * 180) / Math.PI;
 }
 
-function updateSingleTargetDerivedData(
+/**
+ * Updates derived data for a single target (range, bearing, CPA, TCPA, alarms).
+ * Exported for event-based updates when a single target's data changes.
+ */
+export function updateSingleTargetDerivedData(
 	target,
 	selfTarget,
 	collisionProfiles,
@@ -232,9 +239,10 @@ function updateSingleTargetDerivedData(
 	target.latitudeFormatted = formatLat(target.latitude);
 	target.longitudeFormatted = formatLon(target.longitude);
 
+	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
 	if (
-		!target.latitude ||
-		!target.longitude ||
+		target.latitude == null ||
+		target.longitude == null ||
 		target.lastSeen > TARGET_MAX_AGE
 	) {
 		//console.log("invalid target", target.mmsi, target.latitude, target.longitude, target.lastSeen);
@@ -245,7 +253,12 @@ function updateSingleTargetDerivedData(
 }
 
 function calculateRangeAndBearing(selfTarget, target) {
-	if (!selfTarget.isValid || !target.latitude || !target.longitude) {
+	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
+	if (
+		!selfTarget.isValid ||
+		target.latitude == null ||
+		target.longitude == null
+	) {
 		target.range = null;
 		target.bearing = null;
 		// console.log('cant calc range bearing', selfTarget, target);

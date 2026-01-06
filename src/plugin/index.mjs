@@ -6,6 +6,7 @@ import defaultCollisionProfiles from "../web/assets/defaultCollisionProfiles.jso
 import {
 	processDelta as sharedProcessDelta,
 	updateDerivedData,
+	updateSingleTargetDerivedData,
 } from "../web/assets/scripts/ais-utils.mjs";
 import {
 	TARGET_MAX_AGE,
@@ -32,8 +33,6 @@ let options;
 export default function (app) {
 	const plugin = {};
 	let unsubscribes = [];
-
-	let refreshDataModelInterval;
 
 	plugin.id = "signalk-ais-target-prioritizer";
 	plugin.name = "SignalK AIS Target Prioritizer";
@@ -75,9 +74,6 @@ export default function (app) {
 		app.debug(`Stopping plugin ${plugin.id}`);
 		unsubscribes.forEach((f) => f());
 		unsubscribes = [];
-		if (refreshDataModelInterval) {
-			clearInterval(refreshDataModelInterval);
-		}
 		if (options?.enableEmulator) {
 			vesper.stop();
 		}
@@ -323,124 +319,149 @@ export default function (app) {
 						"ERROR: received a delta with an invalid mmsi",
 						JSON.stringify(delta, null, "\t"),
 					);
+					return;
 				}
+
+				// Event-based calculation - process immediately when data arrives
+				const target = targets.get(mmsi);
+				if (!target?.needsRecalc) return;
+
+				selfTarget = targets.get(selfMmsi);
+
+				// Wait for valid self vessel data
+				if (
+					!selfTarget ||
+					selfTarget.latitude == null ||
+					selfTarget.longitude == null
+				) {
+					app.setPluginStatus("Waiting for own vessel GPS position...");
+					return;
+				}
+
+				// If self vessel changed, recalculate all targets
+				if (mmsi === selfMmsi) {
+					try {
+						updateDerivedData(
+							targets,
+							selfTarget,
+							collisionProfiles,
+							TARGET_MAX_AGE,
+						);
+						// Clear needsRecalc for all targets
+						targets.forEach((t) => {
+							t.needsRecalc = false;
+						});
+					} catch (error) {
+						app.debug(error);
+						app.setPluginError(error.message);
+						return;
+					}
+
+					// Process all targets for alarms and publishing
+					let isCurrentAlarm = false;
+					targets.forEach((t, tMmsi) => {
+						if (tMmsi !== selfMmsi) {
+							processTargetUpdate(t, tMmsi);
+							if (t.alarmState && !t.alarmIsMuted) {
+								isCurrentAlarm = true;
+							}
+						}
+					});
+
+					// Clear alarm notification if no active alarms
+					if (!isCurrentAlarm && isCurrentAlarmNotification()) {
+						sendNotification("normal", "watching");
+					}
+					return;
+				} else {
+					// Only recalculate the changed target
+					// First ensure self is valid
+					updateSingleTargetDerivedData(
+						selfTarget,
+						selfTarget,
+						collisionProfiles,
+						TARGET_MAX_AGE,
+					);
+					if (!selfTarget.isValid) {
+						app.setPluginStatus("Own vessel GPS data invalid");
+						return;
+					}
+					updateSingleTargetDerivedData(
+						target,
+						selfTarget,
+						collisionProfiles,
+						TARGET_MAX_AGE,
+					);
+					target.needsRecalc = false;
+				}
+
+				// Process alarms and publishing for changed target
+				processTargetUpdate(target, mmsi);
 			},
 		);
-
-		// update data model every 1 second
-		refreshDataModelInterval = setInterval(refreshDataModel, 1000);
 	}
 
-	async function refreshDataModel() {
-		try {
-			// collisionProfiles.setFromIndex = Math.floor(new Date().getTime() / 1000);
-			// app.debug('index.js: setFromIndex,setFromEmulator', collisionProfiles.setFromIndex, collisionProfiles.setFromEmulator, collisionProfiles.anchor.guard.range);
-			// app.debug("collisionProfiles.anchor.guard.range - index ",collisionProfiles.anchor.guard.range);
+	/**
+	 * Process a single target update - handle alarms and publishing.
+	 */
+	function processTargetUpdate(target, mmsi) {
+		if (mmsi === selfMmsi) return;
 
-			selfTarget = targets.get(selfMmsi);
-
-			// Wait for valid self vessel data before processing
-			if (
-				!selfTarget ||
-				selfTarget.latitude == null ||
-				selfTarget.longitude == null
-			) {
-				app.setPluginStatus("Waiting for own vessel GPS position...");
-				return;
-			}
-
-			try {
-				updateDerivedData(
-					targets,
-					selfTarget,
-					collisionProfiles,
-					TARGET_MAX_AGE,
-				);
-			} catch (error) {
-				app.debug(error); // we use app.debug rather than app.error so that the user can filter these out of the log
-				app.setPluginError(error.message);
-				sendNotification("alarm", error.message);
-				return;
-			}
-
-			if (selfTarget.lastSeen > 30) {
-				const message = `No GPS position received for more than ${selfTarget.lastSeen} seconds`;
-				app.debug(message); // we use app.debug rather than app.error so that the user can filter these out of the log
-				app.setPluginError(message);
-				sendNotification("alarm", message);
-				return;
-			}
-
-			let isCurrentAlarm = false;
-
-			targets.forEach((target, mmsi) => {
-				if (options.enableDataPublishing && mmsi !== selfMmsi) {
-					// Only publish if target data has changed significantly
-					if (hasTargetDataChanged(target)) {
-						pushTargetDataToSignalK(target);
-						// Store last published values
-						target.lastPublishedCpa = target.cpa;
-						target.lastPublishedTcpa = target.tcpa;
-						target.lastPublishedRange = target.range;
-						target.lastPublishedBearing = target.bearing;
-						target.lastPublishedAlarmState = target.alarmState;
-					}
-				}
-
-				// publish warning/alarm notifications only when alarm state changes
-				if (
-					options.enableAlarmPublishing &&
-					target.alarmState &&
-					!target.alarmIsMuted
-				) {
-					// Only send notification if alarm state or type has changed
-					const alarmStateChanged =
-						target.alarmState !== target.lastNotifiedAlarmState ||
-						target.alarmType !== target.lastNotifiedAlarmType;
-
-					if (alarmStateChanged) {
-						const message = (
-							`${target.name || `<${target.mmsi}>`} - ` +
-							`${target.alarmType} ` +
-							`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
-						).toUpperCase();
-						if (target.alarmState === "warning") {
-							sendNotification("warn", message);
-						} else if (target.alarmState === "danger") {
-							sendNotification("alarm", message);
-						}
-						// Track what we notified about
-						target.lastNotifiedAlarmState = target.alarmState;
-						target.lastNotifiedAlarmType = target.alarmType;
-					}
-					isCurrentAlarm = true;
-				} else if (target.lastNotifiedAlarmState) {
-					// Alarm was cleared or muted - reset tracking
-					target.lastNotifiedAlarmState = null;
-					target.lastNotifiedAlarmType = null;
-				}
-
-				if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
-					app.debug(
-						"ageing out target",
-						target.mmsi,
-						target.name,
-						target.lastSeen,
-					);
-					targets.delete(target.mmsi);
-				}
-			});
-
-			// if there are no active alarms, yet still an alarm notification, then clean the alarm notification
-			if (!isCurrentAlarm && isCurrentAlarmNotification()) {
-				sendNotification("normal", "watching");
-			}
-
-			app.setPluginStatus(`Watching ${targets.size - 1} targets`);
-		} catch (err) {
-			app.debug("error in refreshDataModel", err.message, err);
+		// Check for stale GPS
+		if (selfTarget?.lastSeen > 30) {
+			const message = `No GPS position received for more than ${selfTarget.lastSeen} seconds`;
+			app.debug(message);
+			app.setPluginError(message);
+			sendNotification("alarm", message);
+			return;
 		}
+
+		// Publish data if changed significantly
+		if (options.enableDataPublishing) {
+			if (hasTargetDataChanged(target)) {
+				pushTargetDataToSignalK(target);
+				target.lastPublishedCpa = target.cpa;
+				target.lastPublishedTcpa = target.tcpa;
+				target.lastPublishedRange = target.range;
+				target.lastPublishedBearing = target.bearing;
+				target.lastPublishedAlarmState = target.alarmState;
+			}
+		}
+
+		// Handle alarm notifications
+		if (options.enableAlarmPublishing && target.alarmState && !target.alarmIsMuted) {
+			const alarmStateChanged =
+				target.alarmState !== target.lastNotifiedAlarmState ||
+				target.alarmType !== target.lastNotifiedAlarmType;
+
+			if (alarmStateChanged) {
+				const message = (
+					`${target.name || `<${target.mmsi}>`} - ` +
+					`${target.alarmType} ` +
+					`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
+				).toUpperCase();
+				if (target.alarmState === "warning") {
+					sendNotification("warn", message);
+				} else if (target.alarmState === "danger") {
+					sendNotification("alarm", message);
+				}
+				target.lastNotifiedAlarmState = target.alarmState;
+				target.lastNotifiedAlarmType = target.alarmType;
+			}
+		} else if (target.lastNotifiedAlarmState) {
+			target.lastNotifiedAlarmState = null;
+			target.lastNotifiedAlarmType = null;
+		}
+
+		// Age out old targets
+		if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
+			app.debug("ageing out target", target.mmsi, target.name, target.lastSeen);
+			targets.delete(target.mmsi);
+		}
+
+		app.setPluginStatus(`Watching ${targets.size - 1} targets`);
 	}
+
 
 	/**
 	 * Check if target data has changed enough to warrant publishing.
@@ -515,8 +536,8 @@ export default function (app) {
 						{
 							path: "navigation.closestApproach",
 							value: {
-								distance: target.cpa,
-								timeTo: target.tcpa,
+								cpa: target.cpa,
+								tcpa: target.tcpa,
 								range: target.range,
 								bearing: target.bearing,
 								collisionRiskRating: target.order,
