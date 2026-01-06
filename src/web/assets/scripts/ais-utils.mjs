@@ -174,22 +174,51 @@ function updateSingleTargetDerivedData(
 	collisionProfiles,
 	TARGET_MAX_AGE,
 ) {
-	// Guard against null/undefined/NaN values
-	const lat = target.latitude ?? 0;
-	const lon = target.longitude ?? 0;
-	const sog = target.sog ?? 0;
-	const cog = target.cog ?? 0;
-	const selfLat = selfTarget.latitude ?? 0;
+	var lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
+	if (lastSeen < 0) {
+		lastSeen = 0;
+	}
+	target.lastSeen = lastSeen;
+	target.isLost = lastSeen > LOST_TARGET_WARNING_AGE;
 
-	// Clamp latitude to avoid polar singularity (cos(90°) = 0)
-	const clampedSelfLat = Math.max(-89.9, Math.min(89.9, selfLat));
+	// Determine validity BEFORE calculations
+	// Use explicit null/undefined checks - latitude/longitude of 0 are valid (equator/prime meridian)
+	const hasValidPosition =
+		target.latitude != null &&
+		target.longitude != null &&
+		!Number.isNaN(target.latitude) &&
+		!Number.isNaN(target.longitude);
 
-	target.y = lat * 111120;
-	// Using self vessel latitude for longitude scaling is sufficient for short ranges
-	// An average of latitudes would improve accuracy for targets far N/S, but adds complexity
-	target.x = lon * 111120 * Math.cos(toRadians(clampedSelfLat));
-	target.vy = sog * Math.cos(cog); // cog is in radians
-	target.vx = sog * Math.sin(cog); // cog is in radians
+	if (!hasValidPosition || target.lastSeen > TARGET_MAX_AGE) {
+		target.isValid = false;
+	} else {
+		target.isValid = true;
+	}
+
+	// Calculate cartesian coordinates and velocity vectors
+	// Only calculate if we have valid position data
+	if (hasValidPosition && selfTarget.latitude != null) {
+		target.y = target.latitude * 111120;
+		// Use average latitude for better longitude scaling accuracy
+		const avgLatitude =
+			target.mmsi !== selfTarget.mmsi
+				? (target.latitude + selfTarget.latitude) / 2
+				: selfTarget.latitude;
+		target.x = target.longitude * 111120 * Math.cos(toRadians(avgLatitude));
+	} else {
+		target.x = null;
+		target.y = null;
+	}
+
+	// Calculate velocity vectors - use explicit null checks
+	if (target.sog != null && target.cog != null) {
+		target.vy = target.sog * Math.cos(target.cog); // cog is in radians
+		target.vx = target.sog * Math.sin(target.cog); // cog is in radians
+	} else {
+		// Default to stationary if no speed/course data
+		target.vy = 0;
+		target.vx = 0;
+	}
 
 	if (target.mmsi !== selfTarget.mmsi) {
 		calculateRangeAndBearing(selfTarget, target);
@@ -197,15 +226,8 @@ function updateSingleTargetDerivedData(
 		evaluateAlarms(target, collisionProfiles);
 	}
 
-	let lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
-	if (lastSeen < 0) {
-		lastSeen = 0;
-	}
-
 	const mmsiMid = getMid(target.mmsi);
 
-	target.lastSeen = lastSeen;
-	target.isLost = lastSeen > LOST_TARGET_WARNING_AGE;
 	target.mmsiCountryCode = mmsiMidToCountry.get(mmsiMid)?.code;
 	target.mmsiCountryName = mmsiMidToCountry.get(mmsiMid)?.name;
 	target.cpaFormatted = formatCpa(target.cpa);
@@ -231,62 +253,79 @@ function updateSingleTargetDerivedData(
 	target.imoFormatted = target.imo?.replace(/imo/i, "") || "---";
 	target.latitudeFormatted = formatLat(target.latitude);
 	target.longitudeFormatted = formatLon(target.longitude);
-
-	if (
-		!target.latitude ||
-		!target.longitude ||
-		target.lastSeen > TARGET_MAX_AGE
-	) {
-		//console.log("invalid target", target.mmsi, target.latitude, target.longitude, target.lastSeen);
-		target.isValid = false;
-	} else {
-		target.isValid = true;
-	}
 }
 
 function calculateRangeAndBearing(selfTarget, target) {
-	if (!selfTarget.isValid || !target.latitude || !target.longitude) {
+	// Use explicit null/undefined checks - 0 is valid for latitude (equator) and longitude (prime meridian)
+	const selfHasPosition =
+		selfTarget.latitude != null &&
+		selfTarget.longitude != null &&
+		!Number.isNaN(selfTarget.latitude) &&
+		!Number.isNaN(selfTarget.longitude);
+
+	const targetHasPosition =
+		target.latitude != null &&
+		target.longitude != null &&
+		!Number.isNaN(target.latitude) &&
+		!Number.isNaN(target.longitude);
+
+	// Note: We only check for valid positions, not data staleness (isValid)
+	// Range/bearing should be calculated whenever positions are available
+	if (!selfHasPosition || !targetHasPosition) {
 		target.range = null;
 		target.bearing = null;
-		// console.log('cant calc range bearing', selfTarget, target);
 		return;
 	}
 
-	target.range = Math.round(
-		getDistanceFromLatLonInMeters(
-			selfTarget.latitude,
-			selfTarget.longitude,
-			target.latitude,
-			target.longitude,
-		),
-	);
-	target.bearing = Math.round(
-		getRhumbLineBearing(
-			selfTarget.latitude,
-			selfTarget.longitude,
-			target.latitude,
-			target.longitude,
-		),
+	const range = getDistanceFromLatLonInMeters(
+		selfTarget.latitude,
+		selfTarget.longitude,
+		target.latitude,
+		target.longitude,
 	);
 
-	if (target.bearing >= 360) {
-		target.bearing = 0;
+	const bearing = getRhumbLineBearing(
+		selfTarget.latitude,
+		selfTarget.longitude,
+		target.latitude,
+		target.longitude,
+	);
+
+	// Validate results are not NaN before assigning
+	if (Number.isNaN(range) || Number.isNaN(bearing)) {
+		target.range = null;
+		target.bearing = null;
+		return;
 	}
+
+	target.range = Math.round(range);
+	target.bearing = Math.round(bearing) % 360; // Normalize to 0-359
 }
 
 // from: http://geomalgorithms.com/a07-_distance.html
 function updateCpa(selfTarget, target) {
-	if (
-		selfTarget.x == null ||
-		selfTarget.y == null ||
-		selfTarget.vx == null ||
-		selfTarget.vy == null ||
-		target.x == null ||
-		target.y == null ||
-		target.vx == null ||
-		target.vy == null
-	) {
-		//console.log('cant calc cpa: missing data', target.mmsi);
+	// Check for null/undefined AND NaN values
+	const hasValidSelfData =
+		selfTarget.x != null &&
+		selfTarget.y != null &&
+		selfTarget.vx != null &&
+		selfTarget.vy != null &&
+		!Number.isNaN(selfTarget.x) &&
+		!Number.isNaN(selfTarget.y) &&
+		!Number.isNaN(selfTarget.vx) &&
+		!Number.isNaN(selfTarget.vy);
+
+	const hasValidTargetData =
+		target.x != null &&
+		target.y != null &&
+		target.vx != null &&
+		target.vy != null &&
+		!Number.isNaN(target.x) &&
+		!Number.isNaN(target.y) &&
+		!Number.isNaN(target.vx) &&
+		!Number.isNaN(target.vy);
+
+	if (!hasValidSelfData || !hasValidTargetData) {
 		target.cpa = null;
 		target.tcpa = null;
 		return;
@@ -307,7 +346,6 @@ function updateCpa(selfTarget, target) {
 	// the tracks are almost parallel
 	// or there is almost no relative movement
 	if (dv2 < 0.00000001) {
-		// console.log('cant calc tcpa: ',target.mmsi);
 		target.cpa = null;
 		target.tcpa = null;
 		return;
@@ -329,8 +367,7 @@ function updateCpa(selfTarget, target) {
 	// if tcpa is in the past,
 	// or if tcpa is more than TCPA_MAX_SECONDS in the future
 	// then dont calc cpa & tcpa
-	if (!tcpa || tcpa < 0 || tcpa > TCPA_MAX_SECONDS) {
-		//console.log('discarding tcpa: ', target.mmsi, tcpa);
+	if (!tcpa || tcpa < 0 || tcpa > TCPA_MAX_SECONDS || Number.isNaN(tcpa)) {
 		target.cpa = null;
 		target.tcpa = null;
 		return;
@@ -355,6 +392,13 @@ function updateCpa(selfTarget, target) {
 
 	// Guard against NaN results
 	if (!Number.isFinite(cpa) || !Number.isFinite(tcpa)) {
+		target.cpa = null;
+		target.tcpa = null;
+		return;
+	}
+
+	// Validate final results
+	if (Number.isNaN(cpa) || Number.isNaN(tcpa)) {
 		target.cpa = null;
 		target.tcpa = null;
 		return;
