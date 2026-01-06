@@ -253,9 +253,11 @@ export function updateSingleTargetDerivedData(
 }
 
 function calculateRangeAndBearing(selfTarget, target) {
+	// Check actual data directly instead of relying on isValid flag which may not be set yet
 	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
 	if (
-		!selfTarget.isValid ||
+		selfTarget.latitude == null ||
+		selfTarget.longitude == null ||
 		target.latitude == null ||
 		target.longitude == null
 	) {
