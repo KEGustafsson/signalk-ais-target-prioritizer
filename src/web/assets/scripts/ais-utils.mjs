@@ -232,9 +232,10 @@ function updateSingleTargetDerivedData(
 	target.latitudeFormatted = formatLat(target.latitude);
 	target.longitudeFormatted = formatLon(target.longitude);
 
+	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
 	if (
-		!target.latitude ||
-		!target.longitude ||
+		target.latitude == null ||
+		target.longitude == null ||
 		target.lastSeen > TARGET_MAX_AGE
 	) {
 		//console.log("invalid target", target.mmsi, target.latitude, target.longitude, target.lastSeen);
@@ -245,7 +246,12 @@ function updateSingleTargetDerivedData(
 }
 
 function calculateRangeAndBearing(selfTarget, target) {
-	if (!selfTarget.isValid || !target.latitude || !target.longitude) {
+	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
+	if (
+		!selfTarget.isValid ||
+		target.latitude == null ||
+		target.longitude == null
+	) {
 		target.range = null;
 		target.bearing = null;
 		// console.log('cant calc range bearing', selfTarget, target);
