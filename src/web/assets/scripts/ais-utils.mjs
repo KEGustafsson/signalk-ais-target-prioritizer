@@ -35,19 +35,26 @@ export function processDelta(delta, targets) {
 		if (!values) continue;
 
 		for (const value of values) {
+			// Skip if value or value.value is missing
+			if (!value || value.value === undefined) continue;
+
 			switch (value.path) {
 				case "":
-					if (value.value.name) {
+					if (value.value?.name) {
 						target.name = value.value.name;
-					} else if (value.value.communication?.callsignVhf) {
+					} else if (value.value?.communication?.callsignVhf) {
 						target.callsign = value.value.communication.callsignVhf;
-					} else if (value.value.registrations?.imo) {
+					} else if (value.value?.registrations?.imo) {
 						target.imo = value.value.registrations.imo.replace(/imo/i, "");
 					}
 					break;
 				case "navigation.position":
-					target.latitude = value.value.latitude;
-					target.longitude = value.value.longitude;
+					if (value.value?.latitude !== undefined) {
+						target.latitude = value.value.latitude;
+					}
+					if (value.value?.longitude !== undefined) {
+						target.longitude = value.value.longitude;
+					}
 					target.lastSeenDate = new Date(update.timestamp);
 					target.needsRecalc = true; // Position changed - recalculate
 					break;
@@ -69,8 +76,8 @@ export function processDelta(delta, targets) {
 					target.rot = value.value;
 					break;
 				case "design.aisShipType":
-					target.typeId = value.value.id;
-					target.type = value.value.name;
+					target.typeId = value.value?.id;
+					target.type = value.value?.name;
 					break;
 				case "navigation.state":
 					target.status = value.value;
@@ -82,17 +89,17 @@ export function processDelta(delta, targets) {
 					target.destination = value.value;
 					break;
 				case "design.length":
-					target.length = value.value.overall;
+					target.length = value.value?.overall;
 					break;
 				case "design.beam":
 					target.beam = value.value;
 					break;
 				case "design.draft":
-					target.draft = value.value.current;
+					target.draft = value.value?.current;
 					break;
 				case "atonType":
-					target.typeId = value.value.id;
-					target.type = value.value.name;
+					target.typeId = value.value?.id;
+					target.type = value.value?.name;
 					if (target.status == null) {
 						target.status = "default";
 					}
@@ -233,7 +240,7 @@ export function updateSingleTargetDerivedData(
 		target.hdg != null ? `${Math.round(toDegrees(target.hdg))} T` : "---";
 	target.rotFormatted = Math.round(toDegrees(target.rot)) || "---";
 	target.aisClassFormatted =
-		target.aisClass + (target.isVirtual ? " (virtual)" : "");
+		(target.aisClass ?? "---") + (target.isVirtual ? " (virtual)" : "");
 	target.sizeFormatted = `${target.length?.toFixed(1) ?? "---"} m x ${target.beam?.toFixed(1) ?? "---"} m`;
 	target.imoFormatted = target.imo?.replace(/imo/i, "") || "---";
 	target.latitudeFormatted = formatLat(target.latitude);
@@ -551,7 +558,7 @@ function evaluateAlarms(target, collisionProfiles) {
 	}
 }
 
-function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
+export function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
 	const R = 6371000; // Radius of the earth in meters
 	const dLat = toRadians(lat2 - lat1);
 	const dLon = toRadians(lon2 - lon1);
@@ -566,7 +573,7 @@ function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
 	return d;
 }
 
-function getRhumbLineBearing(lat1, lon1, lat2, lon2) {
+export function getRhumbLineBearing(lat1, lon1, lat2, lon2) {
 	// difference of longitude coords
 	let diffLon = toRadians(lon2 - lon1);
 

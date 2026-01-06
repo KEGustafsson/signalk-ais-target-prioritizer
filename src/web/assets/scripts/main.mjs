@@ -1005,7 +1005,7 @@ async function refresh() {
 			showAlarms();
 		}
 
-		if (selfTarget.lastSeen > GPS_STALE_WARNING_SECONDS) {
+		if (selfTarget?.lastSeen > GPS_STALE_WARNING_SECONDS) {
 			console.error(
 				`No GPS position received for more than ${selfTarget.lastSeen} seconds`,
 			);

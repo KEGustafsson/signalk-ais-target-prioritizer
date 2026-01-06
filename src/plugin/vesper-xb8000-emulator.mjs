@@ -1,5 +1,7 @@
 var aisUtilsPromise = import("../web/assets/scripts/ais-utils.mjs");
 let toDegrees;
+let getDistanceFromLatLonInMeters;
+let getRhumbLineBearing;
 
 import express from "express";
 
@@ -200,7 +202,7 @@ function getGpsModelXml() {
 <COG>${formatCog(gps.cog)}</COG>
 <SOG>${formatSog(gps.sog)}</SOG>
 <HDGT>${formatCog(gps.hdg)}</HDGT>
-<magvar>${formatFixed(toDegrees(gps.magvar, 2))}</magvar>
+<magvar>${formatFixed(toDegrees(gps.magvar), 2)}</magvar>
 <hasBowPosition>0</hasBowPosition>
 <sim>stop</sim>
 `;
@@ -224,7 +226,7 @@ function getGpsModelAdvancedXml() {
                 <COG>${formatCog(gps.cog)}</COG>
                 <SOG>${formatSog(gps.sog)}</SOG>
                 <HDGT>${formatCog(gps.hdg)}</HDGT>
-                <magvar>${formatFixed(toDegrees(gps.magvar, 2))}</magvar>
+                <magvar>${formatFixed(toDegrees(gps.magvar), 2)}</magvar>
                 <hasBowPosition>0</hasBowPosition>
                 <sim>stop</sim>
                 <Fix>
@@ -604,36 +606,40 @@ function setupSse() {
 		}, 5000);
 	}
 
-	function sendSseMsg(name, data) {
-		if (debugSseComms) app.debug(`SSE sending ${name}`);
-		var json = JSON.stringify(data);
-		sse.send(`${json.length + 2}:${name}${json}\n\n`);
-	}
-
 	// ******************** END SSE STUFF **********************
 }
 
+function sendSseMsg(name, data) {
+	if (debugSseComms) app.debug(`SSE sending ${name}`);
+	var json = JSON.stringify(data);
+	sse.send(`${json.length + 2}:${name}${json}\n\n`);
+}
+
 // save position - keep up to 2880 positions (24 hours at 30 sec cadence)
-savePositionInterval = setInterval(() => {
-	if (gps?.isValid) {
-		positions.unshift({
-			a: Math.round(gps.latitude * 1e7),
-			o: Math.round(gps.longitude * 1e7),
-			t: gps.lastSeenDate.getTime(),
-		});
+function setupSavePositionInterval() {
+	savePositionInterval = setInterval(() => {
+		if (gps?.isValid) {
+			positions.unshift({
+				a: Math.round(gps.latitude * 1e7),
+				o: Math.round(gps.longitude * 1e7),
+				t: gps.lastSeenDate.getTime(),
+			});
 
-		if (positions.length > 2880) {
-			positions.length = 2880;
+			if (positions.length > 2880) {
+				positions.length = 2880;
+			}
 		}
-	}
-}, savePositionDelay);
+	}, savePositionDelay);
+}
 
-anchorWatchInterval = setInterval(() => {
-	updateAnchorWatch();
-	// collisionProfiles.setFromEmulator = Math.floor(new Date().getTime() / 1000);
-	// app.debug('emulator: setFromIndex,setFromEmulator', collisionProfiles.setFromIndex, collisionProfiles.setFromEmulator, collisionProfiles.anchor.guard.range);
-	// app.debug("collisionProfiles.anchor.guard.range - vesper", collisionProfiles.anchor.guard.range);
-}, 1000);
+function setupAnchorWatchInterval() {
+	anchorWatchInterval = setInterval(() => {
+		updateAnchorWatch();
+		// collisionProfiles.setFromEmulator = Math.floor(new Date().getTime() / 1000);
+		// app.debug('emulator: setFromIndex,setFromEmulator', collisionProfiles.setFromIndex, collisionProfiles.setFromEmulator, collisionProfiles.anchor.guard.range);
+		// app.debug("collisionProfiles.anchor.guard.range - vesper", collisionProfiles.anchor.guard.range);
+	}, 1000);
+}
 
 async function updateAnchorWatch() {
 	try {
@@ -837,7 +843,7 @@ function setupHttpServer() {
 		if (req.query["AnchorWatch.setAnchor"]) {
 			const setAnchor = req.query["AnchorWatch.setAnchor"];
 
-			if (setAnchor === 1) {
+			if (setAnchor === "1") {
 				setAnchored();
 			} else {
 				setUnderway();
@@ -1266,11 +1272,15 @@ export function start(
 	// FIXME
 	Promise.resolve(aisUtilsPromise).then((aisUtils) => {
 		toDegrees = aisUtils.toDegrees;
+		getDistanceFromLatLonInMeters = aisUtils.getDistanceFromLatLonInMeters;
+		getRhumbLineBearing = aisUtils.getRhumbLineBearing;
 		app.debug("starting vesper emulator", collisionProfiles);
 		refreshTargetData();
 		setupHttpServer();
 		setupTcpProxyServer();
 		setupSse();
+		setupSavePositionInterval();
+		setupAnchorWatchInterval();
 
 		// update the data model every 1000 ms
 		refreshInterval = setInterval(() => {
