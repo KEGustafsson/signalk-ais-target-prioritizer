@@ -257,6 +257,8 @@ function updateSingleTargetDerivedData(
 
 function calculateRangeAndBearing(selfTarget, target) {
 	// Use explicit null/undefined checks - 0 is valid for latitude (equator) and longitude (prime meridian)
+	// Note: We only check for valid positions, not data staleness (isValid)
+	// Range/bearing should be calculated whenever positions are available
 	const selfHasPosition =
 		selfTarget.latitude != null &&
 		selfTarget.longitude != null &&
