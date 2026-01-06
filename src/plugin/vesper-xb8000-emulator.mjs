@@ -1204,25 +1204,25 @@ function refreshTargetData() {
 
 	targets.forEach((target, mmsi) => {
 		// 111MIDXXX        SAR (Search and Rescue) aircraft
-		if (mmsi.startsWith("111")) {
+		if (mmsi && mmsi.startsWith("111")) {
 			target.vesperTargetType = 5;
 		}
 		// targetType determines what kind of symbol gets used to represent the target in the vesper mobile app
 		// 970MIDXXX        AIS SART (Search and Rescue Transmitter)
-		else if (mmsi.startsWith("970")) {
+		else if (mmsi && mmsi.startsWith("970")) {
 			target.vesperTargetType = 6;
 		}
 		// 972XXXXXX        MOB (Man Overboard) device
-		else if (mmsi.startsWith("972")) {
+		else if (mmsi && mmsi.startsWith("972")) {
 			target.vesperTargetType = 7;
 		}
 		// 974XXXXXX        EPIRB (Emergency Position Indicating Radio Beacon) AIS
-		else if (mmsi.startsWith("974")) {
+		else if (mmsi && mmsi.startsWith("974")) {
 			target.vesperTargetType = 8;
 		}
 		// Aid to Navigation
 		// 99MIDXXXX        Aids to Navigation
-		else if (target.aisClass === "ATON" || mmsi.startsWith("99")) {
+		else if (target.aisClass === "ATON" || (mmsi && mmsi.startsWith("99"))) {
 			target.vesperTargetType = 4;
 		}
 		// class A

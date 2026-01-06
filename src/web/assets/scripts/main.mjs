@@ -1183,10 +1183,10 @@ function getTargetSvg(target) {
 	// sar
 	else if (
 		target.typeId === 51 ||
-		target.mmsi.startsWith("111") ||
-		target.mmsi.startsWith("970") ||
-		target.mmsi.startsWith("972") ||
-		target.mmsi.startsWith("974")
+		(target.mmsi && target.mmsi.startsWith("111")) ||
+		(target.mmsi && target.mmsi.startsWith("970")) ||
+		(target.mmsi && target.mmsi.startsWith("972")) ||
+		(target.mmsi && target.mmsi.startsWith("974"))
 	) {
 		return targetSvgs.sarSvg;
 	}
@@ -1202,7 +1202,7 @@ function getTargetSvg(target) {
 	}
 
 	// aton
-	else if (target.aisClass === "ATON" || target.mmsi.startsWith("99")) {
+	else if (target.aisClass === "ATON" || (target.mmsi && target.mmsi.startsWith("99"))) {
 		return targetSvgs.atonSvg;
 	}
 
@@ -1592,15 +1592,15 @@ function getTargetIcon(target, isLarge, color) {
 	// 972XXXXXX        MOB (Man Overboard) device
 	// 974XXXXXX        EPIRB (Emergency Position Indicating Radio Beacon) AIS
 	else if (
-		target.mmsi.startsWith("111") ||
-		target.mmsi.startsWith("970") ||
-		target.mmsi.startsWith("972") ||
-		target.mmsi.startsWith("974")
+		(target.mmsi && target.mmsi.startsWith("111")) ||
+		(target.mmsi && target.mmsi.startsWith("970")) ||
+		(target.mmsi && target.mmsi.startsWith("972")) ||
+		(target.mmsi && target.mmsi.startsWith("974"))
 	) {
 		aisIons.getSartIcon();
 	}
 	// 99MIDXXXX        Aids to Navigation
-	else if (target.aisClass === "ATON" || target.mmsi.startsWith("99")) {
+	else if (target.aisClass === "ATON" || (target.mmsi && target.mmsi.startsWith("99"))) {
 		return aisIons.getAtonIcon(target, isLarge, color);
 	}
 	// class A

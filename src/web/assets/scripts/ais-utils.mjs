@@ -306,9 +306,9 @@ function evaluateAlarms(target, collisionProfiles) {
 						collisionProfiles[collisionProfiles.current].warning.speed /
 							KNOTS_PER_M_PER_S));
 
-		target.sartAlarm = target.mmsi.startsWith("970");
-		target.mobAlarm = target.mmsi.startsWith("972");
-		target.epirbAlarm = target.mmsi.startsWith("974");
+		target.sartAlarm = target.mmsi ? target.mmsi.startsWith("970") : false;
+		target.mobAlarm = target.mmsi ? target.mmsi.startsWith("972") : false;
+		target.epirbAlarm = target.mmsi ? target.mmsi.startsWith("974") : false;
 
 		//FIXME - need to clean up this order logic.
 		// targets with alarm status must be at the top
