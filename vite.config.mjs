@@ -8,6 +8,14 @@ export default defineConfig({
 		outDir: "../../public",
 		emptyOutDir: true,
 	},
+	css: {
+		preprocessorOptions: {
+			scss: {
+				// Silence deprecation warnings from Bootstrap's SCSS
+				silenceDeprecations: ["import", "global-builtin", "color-functions"],
+			},
+		},
+	},
 	server: {
 		host: true,
 		allowedHosts: true,

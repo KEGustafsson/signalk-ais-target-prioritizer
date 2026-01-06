@@ -3,28 +3,36 @@ import path from "node:path";
 import defaultCollisionProfiles from "../web/assets/defaultCollisionProfiles.json" with {
 	type: "json",
 };
-import * as aisUtils from "../web/assets/scripts/ais-utils.mjs";
+import {
+	processDelta as sharedProcessDelta,
+	updateDerivedData,
+	updateSingleTargetDerivedData,
+} from "../web/assets/scripts/ais-utils.mjs";
+import {
+	TARGET_MAX_AGE,
+	PUBLISH_THRESHOLDS,
+} from "../shared/constants.mjs";
 import schema from "./schema.json" with { type: "json" };
 import * as vesper from "./vesper-xb8000-emulator.mjs";
 
 const AGE_OUT_OLD_TARGETS = true;
-const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
 
-var selfMmsi;
-var selfName;
-var selfCallsign;
-var selfTypeId;
-var selfTarget;
+/** Regular expression for validating MMSI format (9 digits) */
+const MMSI_REGEX = /^[0-9]{9}$/;
 
-var targets = new Map();
-var collisionProfiles;
-var options;
+let selfMmsi;
+let selfName;
+let selfCallsign;
+let selfTypeId;
+let selfTarget;
+
+const targets = new Map();
+let collisionProfiles;
+let options;
 
 export default function (app) {
-	var plugin = {};
-	var unsubscribes = [];
-
-	var refreshDataModelInterval;
+	const plugin = {};
+	let unsubscribes = [];
 
 	plugin.id = "signalk-ais-target-prioritizer";
 	plugin.name = "SignalK AIS Target Prioritizer";
@@ -64,11 +72,8 @@ export default function (app) {
 
 	plugin.stop = () => {
 		app.debug(`Stopping plugin ${plugin.id}`);
-		// unsubscribes.forEach((f) => f());
+		unsubscribes.forEach((f) => f());
 		unsubscribes = [];
-		if (refreshDataModelInterval) {
-			clearInterval(refreshDataModelInterval);
-		}
 		if (options?.enableEmulator) {
 			vesper.stop();
 		}
@@ -85,7 +90,7 @@ export default function (app) {
 
 		// PUT /plugins/${plugin.id}/setCollisionProfiles
 		router.put("/setCollisionProfiles", (req, res) => {
-			var newCollisionProfiles = req.body;
+			const newCollisionProfiles = req.body;
 			app.debug("setCollisionProfiles", newCollisionProfiles);
 			// do some basic validation to ensure we have some real config data before saving it
 			if (
@@ -109,8 +114,8 @@ export default function (app) {
 			res.json(collisionProfiles);
 		});
 
-		// GET /plugins/${plugin.id}/muteAllAlarms
-		router.get("/muteAllAlarms", (_req, res) => {
+		// POST /plugins/${plugin.id}/muteAllAlarms
+		router.post("/muteAllAlarms", (_req, res) => {
 			app.debug("muteAllAlarms");
 			targets.forEach((target, mmsi) => {
 				if (target.alarmState === "danger" && !target.alarmIsMuted) {
@@ -127,16 +132,24 @@ export default function (app) {
 			res.json();
 		});
 
-		// GET /plugins/${plugin.id}/setAlarmIsMuted/:mmsi/:alarmIsMuted
-		router.get("/setAlarmIsMuted/:mmsi/:alarmIsMuted", (req, res) => {
-			var mmsi = req.params.mmsi;
-			var alarmIsMuted = req.params.alarmIsMuted === "true";
+		// PUT /plugins/${plugin.id}/setAlarmIsMuted
+		router.put("/setAlarmIsMuted", (req, res) => {
+			const { mmsi, alarmIsMuted } = req.body;
+			if (!mmsi || alarmIsMuted === undefined) {
+				res.status(400).json({ error: "mmsi and alarmIsMuted required" });
+				return;
+			}
+			// Validate MMSI format
+			if (typeof mmsi !== "string" || !MMSI_REGEX.test(mmsi)) {
+				res.status(400).json({ error: "Invalid MMSI format (must be 9 digits)" });
+				return;
+			}
 			app.debug("setting alarmIsMuted", mmsi, alarmIsMuted);
 			if (targets.has(mmsi)) {
-				targets.get(mmsi).alarmIsMuted = alarmIsMuted;
-				res.json();
+				targets.get(mmsi).alarmIsMuted = !!alarmIsMuted;
+				res.json({ success: true });
 			} else {
-				res.status(404).end();
+				res.status(404).json({ error: "Target not found" });
 			}
 		});
 
@@ -148,7 +161,7 @@ export default function (app) {
 
 		// GET /plugins/${plugin.id}/getTarget/:mmsi
 		router.get("/getTarget/:mmsi", (req, res) => {
-			var mmsi = req.params.mmsi;
+			const mmsi = req.params.mmsi;
 			app.debug("getTarget", mmsi);
 			if (targets.has(mmsi)) {
 				res.json(targets.get(mmsi));
@@ -180,25 +193,25 @@ export default function (app) {
 			}
 		} catch (err) {
 			app.error("Error reading collisionProfiles.json:", err);
-			throw new Error("Error reading collisionProfiles.json:", err);
+			throw err;
 		}
 	}
 
 	function saveCollisionProfiles() {
 		app.debug("saving ", collisionProfiles);
 
-		var dataDirPath = app.getDataDirPath();
+		const dataDirPath = app.getDataDirPath();
 
 		if (!fs.existsSync(dataDirPath)) {
 			try {
 				fs.mkdirSync(dataDirPath, { recursive: true });
 			} catch (err) {
 				app.error("Error creating dataDirPath:", err);
-				throw new Error("Error creating dataDirPath:", err);
+				throw err;
 			}
 		}
 
-		var collisionProfilesPath = path.join(
+		const collisionProfilesPath = path.join(
 			dataDirPath,
 			"collisionProfiles.json",
 		);
@@ -210,7 +223,7 @@ export default function (app) {
 			);
 		} catch (err) {
 			app.error("Error writing collisionProfiles.json:", err);
-			throw new Error("Error writing collisionProfiles.json:", err);
+			throw err;
 		}
 	}
 
@@ -228,7 +241,7 @@ export default function (app) {
 		// atons.*
 		// vessels.*
 		// vessels.self
-		var localSubscription = {
+		const localSubscription = {
 			context: "*", // we need both vessels and atons
 			subscribe: [
 				{
@@ -299,206 +312,221 @@ export default function (app) {
 			(subscriptionError) => {
 				app.error(`Error:${subscriptionError}`);
 			},
-			(delta) => processDelta(delta),
-		);
-
-		// update data model every 1 second
-		refreshDataModelInterval = setInterval(refreshDataModel, 1000);
-	}
-
-	function processDelta(delta) {
-		var updates = delta.updates;
-		var mmsi = delta.context.slice(-9);
-
-		//app.debug('processDelta', mmsi, delta.updates.length, delta.updates[0].values[0]);
-
-		if (!mmsi || !/[0-9]{9}/.test(mmsi)) {
-			app.debug(
-				"ERROR: received a delta with an invalid mmsi",
-				JSON.stringify(delta, null, "\t"),
-			);
-			return;
-		}
-
-		var target = targets.get(mmsi);
-		if (!target) {
-			target = {
-				// initialize these to zero - because signal k may not set values if the target is stationary
-				// and we may as well start computing CPAs assuming they're stationary
-				sog: 0,
-				cog: 0,
-			};
-			target.mmsi = mmsi;
-		}
-
-		target.context = delta.context;
-
-		for (const update of updates) {
-			const values = update.values;
-			for (const value of values) {
-				//app.debug('value', value);
-
-				switch (value.path) {
-					case "":
-						if (value.value.name) {
-							target.name = value.value.name;
-						} else if (value.value.communication?.callsignVhf) {
-							target.callsign = value.value.communication.callsignVhf;
-						} else if (value.value.registrations?.imo) {
-							target.imo = value.value.registrations.imo.replace(/imo/i, "");
-						} else if (value.value.mmsi) {
-							// we expected mmsi
-						} else {
-							//app.debug('received unexpected delta on root path', delta.context, value.path, value.value);
-						}
-						break;
-					case "navigation.position":
-						target.latitude = value.value.latitude;
-						target.longitude = value.value.longitude;
-						target.lastSeenDate = new Date(update.timestamp);
-						break;
-					case "navigation.courseOverGroundTrue":
-						target.cog = value.value;
-						break;
-					case "navigation.speedOverGround":
-						target.sog = value.value;
-						break;
-					case "navigation.magneticVariation":
-						target.magvar = value.value;
-						break;
-					case "navigation.headingTrue":
-						target.hdg = value.value;
-						break;
-					case "navigation.rateOfTurn":
-						target.rot = value.value;
-						break;
-					case "design.aisShipType":
-						target.typeId = value.value.id;
-						target.type = value.value.name;
-						break;
-					case "navigation.state":
-						target.status = value.value;
-						break;
-					case "sensors.ais.class":
-						target.aisClass = value.value;
-						break;
-					case "navigation.destination.commonName":
-						target.destination = value.value;
-						break;
-					case "design.length":
-						target.length = value.value.overall;
-						break;
-					case "design.beam":
-						target.width = value.value;
-						break;
-					case "design.draft":
-						target.draft = value.value.current;
-						break;
-					case "atonType":
-						target.typeId = value.value.id;
-						target.type = value.value.name;
-						if (target.status == null) {
-							target.status = "default"; // 15 = "default"
-						}
-						break;
-					case "offPosition":
-						target.isOffPosition = value.value ? 1 : 0;
-						break;
-					case "virtual":
-						target.isVirtual = value.value ? 1 : 0;
-						break;
-
-					default:
-					//app.debug('received unexpected delta', delta.context, value.path, value.value);
+			(delta) => {
+				const mmsi = sharedProcessDelta(delta, targets);
+				if (!mmsi) {
+					app.debug(
+						"ERROR: received a delta with an invalid mmsi",
+						JSON.stringify(delta, null, "\t"),
+					);
+					return;
 				}
-			}
-		}
 
-		targets.set(mmsi, target);
-	}
+				// Event-based calculation - process immediately when data arrives
+				const target = targets.get(mmsi);
+				if (!target?.needsRecalc) return;
 
-	async function refreshDataModel() {
-		try {
-			// collisionProfiles.setFromIndex = Math.floor(new Date().getTime() / 1000);
-			// app.debug('index.js: setFromIndex,setFromEmulator', collisionProfiles.setFromIndex, collisionProfiles.setFromEmulator, collisionProfiles.anchor.guard.range);
-			// app.debug("collisionProfiles.anchor.guard.range - index ",collisionProfiles.anchor.guard.range);
+				selfTarget = targets.get(selfMmsi);
 
-			selfTarget = targets.get(selfMmsi);
+				// Wait for valid self vessel data
+				if (
+					!selfTarget ||
+					selfTarget.latitude == null ||
+					selfTarget.longitude == null
+				) {
+					app.setPluginStatus("Waiting for own vessel GPS position...");
+					return;
+				}
 
-			if (aisUtils) {
-				try {
-					aisUtils.updateDerivedData(
-						targets,
+				// If self vessel changed, recalculate all targets
+				if (mmsi === selfMmsi) {
+					try {
+						updateDerivedData(
+							targets,
+							selfTarget,
+							collisionProfiles,
+							TARGET_MAX_AGE,
+						);
+						// Clear needsRecalc for all targets
+						targets.forEach((t) => {
+							t.needsRecalc = false;
+						});
+					} catch (error) {
+						app.debug(error);
+						app.setPluginError(error.message);
+						return;
+					}
+
+					// Process all targets for alarms and publishing
+					let isCurrentAlarm = false;
+					targets.forEach((t, tMmsi) => {
+						if (tMmsi !== selfMmsi) {
+							processTargetUpdate(t, tMmsi);
+							if (t.alarmState && !t.alarmIsMuted) {
+								isCurrentAlarm = true;
+							}
+						}
+					});
+
+					// Clear alarm notification if no active alarms
+					if (!isCurrentAlarm && isCurrentAlarmNotification()) {
+						sendNotification("normal", "watching");
+					}
+					return;
+				} else {
+					// Only recalculate the changed target
+					// First ensure self is valid
+					updateSingleTargetDerivedData(
+						selfTarget,
 						selfTarget,
 						collisionProfiles,
 						TARGET_MAX_AGE,
 					);
-				} catch (error) {
-					app.debug(error); // we use app.debug rather than app.error so that the user can filter these out of the log
-					app.setPluginError(error.message);
-					sendNotification("alarm", error.message);
-					return;
-				}
-			} else {
-				app.debug("aisUtils not ready...");
-				return;
-			}
-
-			if (selfTarget.lastSeen > 30) {
-				const message = `No GPS position received for more than ${selfTarget.lastSeen} seconds`;
-				app.debug(message); // we use app.debug rather than app.error so that the user can filter these out of the log
-				app.setPluginError(message);
-				sendNotification("alarm", message);
-				return;
-			}
-
-			let isCurrentAlarm = false;
-
-			targets.forEach((target, mmsi) => {
-				if (options.enableDataPublishing && mmsi !== selfMmsi) {
-					pushTargetDataToSignalK(target);
-				}
-
-				// publish warning/alarm notifications
-				// FIXME - should we send 1 notification for all targets? or separate notifications for each target?
-				if (
-					options.enableAlarmPublishing &&
-					target.alarmState &&
-					!target.alarmIsMuted
-				) {
-					const message = (
-						`${target.name || `<${target.mmsi}>`} - ` +
-						`${target.alarmType} ` +
-						`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
-					).toUpperCase();
-					if (target.alarmState === "warning") {
-						sendNotification("warn", message);
-					} else if (target.alarmState === "danger") {
-						sendNotification("alarm", message);
+					if (!selfTarget.isValid) {
+						app.setPluginStatus("Own vessel GPS data invalid");
+						return;
 					}
-					isCurrentAlarm = true;
-				}
-
-				if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
-					app.debug(
-						"ageing out target",
-						target.mmsi,
-						target.name,
-						target.lastSeen,
+					updateSingleTargetDerivedData(
+						target,
+						selfTarget,
+						collisionProfiles,
+						TARGET_MAX_AGE,
 					);
-					targets.delete(target.mmsi);
+					target.needsRecalc = false;
 				}
-			});
 
-			// if there are no active alarms, yet still an alarm notification, then clean the alarm notification
-			if (!isCurrentAlarm && isCurrentAlarmNotification()) {
-				sendNotification("normal", "watching");
-			}
+				// Process alarms and publishing for changed target
+				processTargetUpdate(target, mmsi);
+			},
+		);
+	}
 
-			app.setPluginStatus(`Watching ${targets.size - 1} targets`);
-		} catch (err) {
-			app.debug("error in refreshDataModel", err.message, err);
+	/**
+	 * Process a single target update - handle alarms and publishing.
+	 */
+	function processTargetUpdate(target, mmsi) {
+		if (mmsi === selfMmsi) return;
+
+		// Check for stale GPS
+		if (selfTarget?.lastSeen > 30) {
+			const message = `No GPS position received for more than ${selfTarget.lastSeen} seconds`;
+			app.debug(message);
+			app.setPluginError(message);
+			sendNotification("alarm", message);
+			return;
 		}
+
+		// Publish data if changed significantly
+		if (options.enableDataPublishing) {
+			if (hasTargetDataChanged(target)) {
+				pushTargetDataToSignalK(target);
+				target.lastPublishedCpa = target.cpa;
+				target.lastPublishedTcpa = target.tcpa;
+				target.lastPublishedRange = target.range;
+				target.lastPublishedBearing = target.bearing;
+				target.lastPublishedAlarmState = target.alarmState;
+			}
+		}
+
+		// Handle alarm notifications
+		if (options.enableAlarmPublishing && target.alarmState && !target.alarmIsMuted) {
+			const alarmStateChanged =
+				target.alarmState !== target.lastNotifiedAlarmState ||
+				target.alarmType !== target.lastNotifiedAlarmType;
+
+			if (alarmStateChanged) {
+				const message = (
+					`${target.name || `<${target.mmsi}>`} - ` +
+					`${target.alarmType} ` +
+					`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
+				).toUpperCase();
+				if (target.alarmState === "warning") {
+					sendNotification("warn", message);
+				} else if (target.alarmState === "danger") {
+					sendNotification("alarm", message);
+				}
+				target.lastNotifiedAlarmState = target.alarmState;
+				target.lastNotifiedAlarmType = target.alarmType;
+			}
+		} else if (target.lastNotifiedAlarmState) {
+			target.lastNotifiedAlarmState = null;
+			target.lastNotifiedAlarmType = null;
+		}
+
+		// Age out old targets
+		if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
+			app.debug("ageing out target", target.mmsi, target.name, target.lastSeen);
+			targets.delete(target.mmsi);
+		}
+
+		app.setPluginStatus(`Watching ${targets.size - 1} targets`);
+	}
+
+
+	/**
+	 * Check if target data has changed enough to warrant publishing.
+	 * Uses thresholds to avoid flooding SignalK with minor changes.
+	 * @param {Object} target - The target to check
+	 * @returns {boolean} - True if data should be published
+	 */
+	function hasTargetDataChanged(target) {
+		// Always publish if never published before
+		if (target.lastPublishedCpa === undefined) {
+			return true;
+		}
+
+		// Publish if alarm state changed
+		if (target.alarmState !== target.lastPublishedAlarmState) {
+			return true;
+		}
+
+		// Publish if CPA changed by more than threshold
+		if (
+			target.cpa != null &&
+			target.lastPublishedCpa != null &&
+			Math.abs(target.cpa - target.lastPublishedCpa) > PUBLISH_THRESHOLDS.CPA_METERS
+		) {
+			return true;
+		}
+
+		// Publish if TCPA changed by more than threshold
+		if (
+			target.tcpa != null &&
+			target.lastPublishedTcpa != null &&
+			Math.abs(target.tcpa - target.lastPublishedTcpa) > PUBLISH_THRESHOLDS.TCPA_SECONDS
+		) {
+			return true;
+		}
+
+		// Publish if range changed by more than threshold
+		if (
+			target.range != null &&
+			target.lastPublishedRange != null &&
+			Math.abs(target.range - target.lastPublishedRange) > PUBLISH_THRESHOLDS.RANGE_METERS
+		) {
+			return true;
+		}
+
+		// Publish if bearing changed by more than threshold
+		if (
+			target.bearing != null &&
+			target.lastPublishedBearing != null &&
+			Math.abs(target.bearing - target.lastPublishedBearing) > PUBLISH_THRESHOLDS.BEARING_DEGREES
+		) {
+			return true;
+		}
+
+		// Publish if values went from null to non-null or vice versa
+		if (
+			(target.cpa == null) !== (target.lastPublishedCpa == null) ||
+			(target.tcpa == null) !== (target.lastPublishedTcpa == null) ||
+			(target.range == null) !== (target.lastPublishedRange == null) ||
+			(target.bearing == null) !== (target.lastPublishedBearing == null)
+		) {
+			return true;
+		}
+
+		return false;
 	}
 
 	function pushTargetDataToSignalK(target) {
@@ -510,8 +538,8 @@ export default function (app) {
 						{
 							path: "navigation.closestApproach",
 							value: {
-								distance: target.cpa,
-								timeTo: target.tcpa,
+								cpa: target.cpa,
+								tcpa: target.tcpa,
 								range: target.range,
 								bearing: target.bearing,
 								collisionRiskRating: target.order,
@@ -527,7 +555,7 @@ export default function (app) {
 
 	function sendNotification(state, message) {
 		app.debug("sendNotification", state, message);
-		var delta = {
+		const delta = {
 			updates: [
 				{
 					values: [

@@ -1,5 +1,3 @@
-// FIXME rot coming in in radians now
-
 var aisUtilsPromise = import("../web/assets/scripts/ais-utils.mjs");
 let toDegrees;
 
@@ -14,11 +12,7 @@ var sse = new SSE();
 
 import proxy from "node-tcp-proxy";
 
-// import { clearInterval } from "timers";
-// import mdns from "multicast-dns";
-
-const METERS_PER_NM = 1852;
-const KNOTS_PER_M_PER_S = 1.94384;
+import { METERS_PER_NM, KNOTS_PER_M_PER_S } from "../shared/constants.mjs";
 
 const httpPort = 39151;
 
@@ -1140,12 +1134,21 @@ function formatCog(cog) {
 	return cog === undefined ? "" : `00${Math.round(toDegrees(cog))}`.slice(-3);
 }
 
+/**
+ * Formats Rate of Turn for Vesper display.
+ * SignalK provides ROT in radians per second.
+ * Vesper expects display in degrees per minute.
+ * @param {number} rot - Rate of turn in radians per second
+ * @returns {string} - Formatted ROT string (e.g., "3°/min")
+ */
 function formatRot(rot) {
-	// sample: 3°/min
-	// to decode the field value, divide by 4.733and then square it. Sign of the field value should be preserved
-	return rot === undefined || rot === 0 || rot === -128
-		? ""
-		: `${Math.round((rot / 4.733) ** 2)}°/min`;
+	if (rot === undefined || rot === null || rot === 0) {
+		return "";
+	}
+	// Convert radians/second to degrees/minute
+	// radians/sec * (180/π) * 60 = degrees/min
+	const degreesPerMinute = rot * (180 / Math.PI) * 60;
+	return `${Math.round(degreesPerMinute)}°/min`;
 }
 
 function formatCpa(cpa) {

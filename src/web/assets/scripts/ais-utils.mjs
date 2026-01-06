@@ -1,9 +1,126 @@
 import { mmsiMidToCountry } from "./mmsi-mid-decoder.mjs";
+import {
+	METERS_PER_NM,
+	KNOTS_PER_M_PER_S,
+	LOST_TARGET_WARNING_AGE,
+	TCPA_MAX_SECONDS,
+	PRIORITY_ORDER,
+	PRIORITY_WEIGHTS,
+} from "../../../shared/constants.mjs";
 
-const METERS_PER_NM = 1852;
-const KNOTS_PER_M_PER_S = 1.94384;
-const LOST_TARGET_WARNING_AGE = 10 * 60; // in seconds - 10 minutes
+/**
+ * Process a SignalK delta message and update the target in the targets map.
+ * Shared between frontend (WebSocket) and backend (subscription).
+ * @param {Object} delta - The SignalK delta message
+ * @param {Map} targets - Map of targets keyed by MMSI
+ * @returns {string|null} - The MMSI of the updated target, or null if invalid
+ */
+export function processDelta(delta, targets) {
+	if (!delta.context) return null;
 
+	const mmsi = delta.context.slice(-9);
+	if (!mmsi || !/^[0-9]{9}$/.test(mmsi)) return null;
+
+	let target = targets.get(mmsi);
+	if (!target) {
+		target = { sog: 0, cog: 0, mmsi: mmsi, needsRecalc: true };
+	}
+	target.context = delta.context;
+
+	const updates = delta.updates;
+	if (!updates) return mmsi;
+
+	for (const update of updates) {
+		const values = update.values;
+		if (!values) continue;
+
+		for (const value of values) {
+			switch (value.path) {
+				case "":
+					if (value.value.name) {
+						target.name = value.value.name;
+					} else if (value.value.communication?.callsignVhf) {
+						target.callsign = value.value.communication.callsignVhf;
+					} else if (value.value.registrations?.imo) {
+						target.imo = value.value.registrations.imo.replace(/imo/i, "");
+					}
+					break;
+				case "navigation.position":
+					target.latitude = value.value.latitude;
+					target.longitude = value.value.longitude;
+					target.lastSeenDate = new Date(update.timestamp);
+					target.needsRecalc = true; // Position changed - recalculate
+					break;
+				case "navigation.courseOverGroundTrue":
+					target.cog = value.value;
+					target.needsRecalc = true; // Course changed - recalculate
+					break;
+				case "navigation.speedOverGround":
+					target.sog = value.value;
+					target.needsRecalc = true; // Speed changed - recalculate
+					break;
+				case "navigation.magneticVariation":
+					target.magvar = value.value;
+					break;
+				case "navigation.headingTrue":
+					target.hdg = value.value;
+					break;
+				case "navigation.rateOfTurn":
+					target.rot = value.value;
+					break;
+				case "design.aisShipType":
+					target.typeId = value.value.id;
+					target.type = value.value.name;
+					break;
+				case "navigation.state":
+					target.status = value.value;
+					break;
+				case "sensors.ais.class":
+					target.aisClass = value.value;
+					break;
+				case "navigation.destination.commonName":
+					target.destination = value.value;
+					break;
+				case "design.length":
+					target.length = value.value.overall;
+					break;
+				case "design.beam":
+					target.beam = value.value;
+					break;
+				case "design.draft":
+					target.draft = value.value.current;
+					break;
+				case "atonType":
+					target.typeId = value.value.id;
+					target.type = value.value.name;
+					if (target.status == null) {
+						target.status = "default";
+					}
+					break;
+				case "offPosition":
+					target.isOffPosition = value.value ? 1 : 0;
+					break;
+				case "virtual":
+					target.isVirtual = value.value ? 1 : 0;
+					break;
+			}
+		}
+	}
+
+	targets.set(mmsi, target);
+	return mmsi;
+}
+
+/**
+ * Updates derived data for all targets (range, bearing, CPA, TCPA, alarms).
+ * This is the main calculation loop that should be called periodically (e.g., every second).
+ *
+ * @param {Map<string, Object>} targets - Map of all AIS targets keyed by MMSI
+ * @param {Object} selfTarget - The own vessel target (must have valid lat/lon)
+ * @param {Object} collisionProfiles - Collision profile configuration with thresholds
+ * @param {number} TARGET_MAX_AGE - Maximum age in seconds before a target is considered stale
+ * @throws {Error} If selfTarget is missing or has invalid position data
+ */
 export function updateDerivedData(
 	targets,
 	selfTarget,
@@ -16,10 +133,8 @@ export function updateDerivedData(
 			"No GPS position available (no data for our own vessel)",
 			selfTarget,
 		);
+		// Caller is responsible for handling this error and showing appropriate UI/notification
 		throw new Error("No GPS position available (no data for our own vessel)");
-		// FIXME: raise an alarm notification for this
-		// FIXME: post a plugin error status for this
-		//return;
 	}
 
 	updateSingleTargetDerivedData(
@@ -31,10 +146,8 @@ export function updateDerivedData(
 
 	if (!selfTarget.isValid) {
 		console.warn("No GPS position available (data is invalid)", selfTarget);
+		// Caller is responsible for handling this error and showing appropriate UI/notification
 		throw new Error("No GPS position available (data is invalid)");
-		// FIXME: raise an alarm notification for this
-		// FIXME: post a plugin error status for this
-		//return;
 	}
 
 	// then update all other targets
@@ -58,18 +171,32 @@ export function toDegrees(v) {
 	return (v * 180) / Math.PI;
 }
 
-function updateSingleTargetDerivedData(
+/**
+ * Updates derived data for a single target (range, bearing, CPA, TCPA, alarms).
+ * Exported for event-based updates when a single target's data changes.
+ */
+export function updateSingleTargetDerivedData(
 	target,
 	selfTarget,
 	collisionProfiles,
 	TARGET_MAX_AGE,
 ) {
-	target.y = target.latitude * 111120;
-	// FIXME this might work better using an average of the latitudes of the target and selfTarget
-	target.x =
-		target.longitude * 111120 * Math.cos(toRadians(selfTarget.latitude));
-	target.vy = target.sog * Math.cos(target.cog); // cog is in radians
-	target.vx = target.sog * Math.sin(target.cog); // cog is in radians
+	// Guard against null/undefined/NaN values
+	const lat = target.latitude ?? 0;
+	const lon = target.longitude ?? 0;
+	const sog = target.sog ?? 0;
+	const cog = target.cog ?? 0;
+	const selfLat = selfTarget.latitude ?? 0;
+
+	// Clamp latitude to avoid polar singularity (cos(90°) = 0)
+	const clampedSelfLat = Math.max(-89.9, Math.min(89.9, selfLat));
+
+	target.y = lat * 111120;
+	// Using self vessel latitude for longitude scaling is sufficient for short ranges
+	// An average of latitudes would improve accuracy for targets far N/S, but adds complexity
+	target.x = lon * 111120 * Math.cos(toRadians(clampedSelfLat));
+	target.vy = sog * Math.cos(cog); // cog is in radians
+	target.vx = sog * Math.sin(cog); // cog is in radians
 
 	if (target.mmsi !== selfTarget.mmsi) {
 		calculateRangeAndBearing(selfTarget, target);
@@ -77,12 +204,12 @@ function updateSingleTargetDerivedData(
 		evaluateAlarms(target, collisionProfiles);
 	}
 
-	var lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
+	let lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
 	if (lastSeen < 0) {
 		lastSeen = 0;
 	}
 
-	var mmsiMid = getMid(target.mmsi);
+	const mmsiMid = getMid(target.mmsi);
 
 	target.lastSeen = lastSeen;
 	target.isLost = lastSeen > LOST_TARGET_WARNING_AGE;
@@ -112,9 +239,10 @@ function updateSingleTargetDerivedData(
 	target.latitudeFormatted = formatLat(target.latitude);
 	target.longitudeFormatted = formatLon(target.longitude);
 
+	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
 	if (
-		!target.latitude ||
-		!target.longitude ||
+		target.latitude == null ||
+		target.longitude == null ||
 		target.lastSeen > TARGET_MAX_AGE
 	) {
 		//console.log("invalid target", target.mmsi, target.latitude, target.longitude, target.lastSeen);
@@ -125,7 +253,14 @@ function updateSingleTargetDerivedData(
 }
 
 function calculateRangeAndBearing(selfTarget, target) {
-	if (!selfTarget.isValid || !target.latitude || !target.longitude) {
+	// Check actual data directly instead of relying on isValid flag which may not be set yet
+	// Use proper null checks - !value fails for lat=0 (equator) or lon=0 (prime meridian)
+	if (
+		selfTarget.latitude == null ||
+		selfTarget.longitude == null ||
+		target.latitude == null ||
+		target.longitude == null
+	) {
 		target.range = null;
 		target.bearing = null;
 		// console.log('cant calc range bearing', selfTarget, target);
@@ -175,13 +310,13 @@ function updateCpa(selfTarget, target) {
 	// dv = Tr1.v - Tr2.v
 	// this is relative speed
 	// m/s
-	var dv = {
+	const dv = {
 		x: target.vx - selfTarget.vx,
 		y: target.vy - selfTarget.vy,
 	};
 
 	// (m/s)^2
-	var dv2 = dot(dv, dv);
+	const dv2 = dot(dv, dv);
 
 	// guard against division by zero
 	// the tracks are almost parallel
@@ -197,22 +332,19 @@ function updateCpa(selfTarget, target) {
 	// this is relative position
 	// 111120 m / deg lat
 	// m
-	// FIXME isnt this the same as target.y - selfTarget.y
-	var w0 = {
+	const w0 = {
 		x: target.x - selfTarget.x,
 		y: target.y - selfTarget.y,
-		// x: (target.longitude - selfTarget.longitude) * 111120 * Math.cos(toRadians(selfTarget.latitude)),
-		// y: (target.latitude - selfTarget.latitude) * 111120,
 	};
 
 	// in secs
 	// m * m/s / (m/s)^2 = m / (m/s) = s
-	var tcpa = -dot(w0, dv) / dv2;
+	const tcpa = -dot(w0, dv) / dv2;
 
 	// if tcpa is in the past,
-	// or if tcpa is more than 3 hours in the future
+	// or if tcpa is more than TCPA_MAX_SECONDS in the future
 	// then dont calc cpa & tcpa
-	if (!tcpa || tcpa < 0 || tcpa > 3 * 3600) {
+	if (!tcpa || tcpa < 0 || tcpa > TCPA_MAX_SECONDS) {
 		//console.log('discarding tcpa: ', target.mmsi, tcpa);
 		target.cpa = null;
 		target.tcpa = null;
@@ -221,20 +353,27 @@ function updateCpa(selfTarget, target) {
 
 	// Point P1 = Tr1.P0 + (ctime * Tr1.v);
 	// m
-	var p1 = {
+	const p1 = {
 		x: selfTarget.x + tcpa * selfTarget.vx,
 		y: selfTarget.y + tcpa * selfTarget.vy,
 	};
 
 	// Point P2 = Tr2.P0 + (ctime * Tr2.v);
 	// m
-	var p2 = {
+	const p2 = {
 		x: target.x + tcpa * target.vx,
 		y: target.y + tcpa * target.vy,
 	};
 
 	// in meters
-	var cpa = dist(p1, p2);
+	const cpa = dist(p1, p2);
+
+	// Guard against NaN results
+	if (!Number.isFinite(cpa) || !Number.isFinite(tcpa)) {
+		target.cpa = null;
+		target.tcpa = null;
+		return;
+	}
 
 	// in meters
 	target.cpa = Math.round(cpa);
@@ -310,9 +449,10 @@ function evaluateAlarms(target, collisionProfiles) {
 		target.mobAlarm = target.mmsi.startsWith("972");
 		target.epirbAlarm = target.mmsi.startsWith("974");
 
-		//FIXME - need to clean up this order logic.
-		// targets with alarm status must be at the top
-		// targets with negative tcpa are very low priority
+		// Order/priority logic:
+		// - Base order: alarm (10000) < warning (20000) < closing (30000) < diverging (40000)
+		// - Modifiers: shorter TCPA and smaller CPA reduce order (higher priority)
+		// - Greater range increases order (lower priority)
 
 		// alarm
 		if (
@@ -323,22 +463,22 @@ function evaluateAlarms(target, collisionProfiles) {
 			target.epirbAlarm
 		) {
 			target.alarmState = "danger";
-			target.order = 10000;
+			target.order = PRIORITY_ORDER.DANGER;
 		}
 		// warning
 		else if (target.collisionWarning) {
 			target.alarmState = "warning";
-			target.order = 20000;
+			target.order = PRIORITY_ORDER.WARNING;
 		}
 		// no alarm/warning - but has positive tcpa (closing)
 		else if (target.tcpa != null && target.tcpa > 0) {
 			target.alarmState = null;
-			target.order = 30000;
+			target.order = PRIORITY_ORDER.CLOSING;
 		}
-		// no alarm/warning and moving away)
+		// no alarm/warning and moving away
 		else {
 			target.alarmState = null;
-			target.order = 40000;
+			target.order = PRIORITY_ORDER.DIVERGING;
 		}
 
 		const alarms = [];
@@ -358,67 +498,80 @@ function evaluateAlarms(target, collisionProfiles) {
 		// sort sooner tcpa targets to top
 		if (target.tcpa != null && target.tcpa > 0) {
 			// sort vessels with any tcpa above vessels that dont have a tcpa
-			target.order -= 1000;
-			// tcpa of 0 seconds reduces order by 1000 (this is an arbitrary weighting)
+			target.order -= PRIORITY_WEIGHTS.HAS_TCPA_BONUS;
+			// tcpa of 0 seconds reduces order by TCPA_WEIGHT
 			// tcpa of 60 minutes reduces order by 0
-			const weight = 1000;
 			target.order -= Math.max(
 				0,
-				Math.round(weight - (weight * target.tcpa) / 3600),
+				Math.round(
+					PRIORITY_WEIGHTS.TCPA_WEIGHT -
+						(PRIORITY_WEIGHTS.TCPA_WEIGHT * target.tcpa) / 3600,
+				),
 			);
 		}
 
 		// sort closer cpa targets to top
 		if (target.cpa != null && target.cpa > 0) {
-			// cpa of 0 nm reduces order by 2000 (this is an arbitrary weighting)
+			// cpa of 0 nm reduces order by CPA_WEIGHT
 			// cpa of 5 nm reduces order by 0
-			const weight = 2000;
 			target.order -= Math.max(
 				0,
-				Math.round(weight - (weight * target.cpa) / 5 / METERS_PER_NM),
+				Math.round(
+					PRIORITY_WEIGHTS.CPA_WEIGHT -
+						(PRIORITY_WEIGHTS.CPA_WEIGHT * target.cpa) / 5 / METERS_PER_NM,
+				),
 			);
 		}
 
 		// sort closer targets to top
 		if (target.range != null && target.range > 0) {
 			// range of 0 nm increases order by 0
-			// range of 5 nm increases order by 500
-			target.order += Math.round((100 * target.range) / METERS_PER_NM);
+			// larger range increases order, capped at RANGE_WEIGHT_MAX
+			const rangeAdjust = Math.min(
+				PRIORITY_WEIGHTS.RANGE_WEIGHT_MAX,
+				Math.round(
+					(PRIORITY_WEIGHTS.RANGE_WEIGHT_PER_NM * target.range) / METERS_PER_NM,
+				),
+			);
+			target.order += rangeAdjust;
 		}
-
-		// FIXME might be interesting to calculate rate of closure
-		// high positive rate of close decreases order
 
 		// sort targets with no range to bottom
 		if (target.range == null) {
-			target.order += 99999;
+			target.order += PRIORITY_ORDER.NO_RANGE;
 		}
+
+		// Clamp final order to prevent any overflow issues
+		target.order = Math.max(
+			PRIORITY_WEIGHTS.ORDER_MIN,
+			Math.min(PRIORITY_WEIGHTS.ORDER_MAX, target.order),
+		);
 	} catch (err) {
 		console.error("error in evaluateAlarms", err.message, err);
 	}
 }
 
 function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
-	var R = 6371000; // Radius of the earth in meters
-	var dLat = toRadians(lat2 - lat1);
-	var dLon = toRadians(lon2 - lon1);
-	var a =
+	const R = 6371000; // Radius of the earth in meters
+	const dLat = toRadians(lat2 - lat1);
+	const dLon = toRadians(lon2 - lon1);
+	const a =
 		Math.sin(dLat / 2) * Math.sin(dLat / 2) +
 		Math.cos(toRadians(lat1)) *
 			Math.cos(toRadians(lat2)) *
 			Math.sin(dLon / 2) *
 			Math.sin(dLon / 2);
-	var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-	var d = R * c; // Distance in meters
+	const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+	const d = R * c; // Distance in meters
 	return d;
 }
 
 function getRhumbLineBearing(lat1, lon1, lat2, lon2) {
 	// difference of longitude coords
-	var diffLon = toRadians(lon2 - lon1);
+	let diffLon = toRadians(lon2 - lon1);
 
 	// difference latitude coords phi
-	var diffPhi = Math.log(
+	const diffPhi = Math.log(
 		Math.tan(toRadians(lat2) / 2 + Math.PI / 4) /
 			Math.tan(toRadians(lat1) / 2 + Math.PI / 4),
 	);
@@ -465,17 +618,17 @@ function getMid(mmsi) {
 
 // N 39° 57.0689
 function formatLat(dec) {
-	var decAbs = Math.abs(dec);
-	var deg = `0${Math.floor(decAbs)}`.slice(-2);
-	var min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
+	const decAbs = Math.abs(dec);
+	const deg = `0${Math.floor(decAbs)}`.slice(-2);
+	const min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
 	return `${dec > 0 ? "N" : "S"} ${deg}° ${min}`;
 }
 
 // W 075° 08.3692
 function formatLon(dec) {
-	var decAbs = Math.abs(dec);
-	var deg = `00${Math.floor(decAbs)}`.slice(-3);
-	var min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
+	const decAbs = Math.abs(dec);
+	const deg = `00${Math.floor(decAbs)}`.slice(-3);
+	const min = `0${((decAbs - deg) * 60).toFixed(4)}`.slice(-7);
 	return `${dec > 0 ? "E" : "W"} ${deg}° ${min}`;
 }
 

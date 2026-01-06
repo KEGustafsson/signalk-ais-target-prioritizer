@@ -1,13 +1,18 @@
-// FIXME: need map rotation option to toggle between north-up and cog-up
-// FIXME need to investigate node OOM issues - leak?
+import {
+	DEFAULT_MAP_ZOOM,
+	METERS_PER_NM,
+	COURSE_PROJECTION_MINUTES,
+	TARGET_MAX_AGE,
+	GPS_STALE_WARNING_SECONDS,
+	SHOW_ALARMS_INTERVAL,
+	PLUGIN_ID,
+	WS_RECONNECT_BASE_DELAY,
+	WS_RECONNECT_MAX_DELAY,
+	STORAGE_KEYS,
+} from "../../../shared/constants.mjs";
 
-const DEFAULT_MAP_ZOOM = 14; // 14 gives us 2+ NM
-const METERS_PER_NM = 1852;
-const COURSE_PROJECTION_MINUTES = 10;
 const AGE_OUT_OLD_TARGETS = true;
-const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
-const SHOW_ALARMS_INTERVAL = 60 * 1000; // show alarms every 60 seconds
-const PLUGIN_ID = "signalk-ais-target-prioritizer";
+const USE_WEBSOCKET_STREAMING = true; // Use WebSocket streaming instead of polling
 
 import * as bootstrap from "bootstrap";
 import * as labelgun from "labelgun";
@@ -20,35 +25,41 @@ import defaultCollisionProfiles from "../defaultCollisionProfiles.json";
 import hornMp3Url from "../horn.mp3";
 import pmtilesUrl from "../ne_10m_land.pmtiles?url&no-inline";
 import * as aisIons from "./ais-icons.mjs";
-import { toDegrees, toRadians, updateDerivedData } from "./ais-utils.mjs";
+import {
+	processDelta,
+	toDegrees,
+	toRadians,
+	updateDerivedData,
+} from "./ais-utils.mjs";
 import * as targetSvgs from "./ship-icons.mjs";
 
-var noSleep = new NoSleep();
-var collisionProfiles;
-var selfMmsi;
-var selfTarget;
-var offsetLatitude = 0;
-var offsetLongitude = 0;
-var disableMoveend = false;
-var disableMapPanTo = false;
-var targets = new Map();
-var pluginTargets;
-var boatMarkers = new Map();
-var boatProjectedCourseLines = new Map();
-var rangeRings = L.layerGroup();
-var selectedVesselMmsi;
-var blueBoxIcon;
-var blueCircle1;
-var blueCircle2;
-var validTargetCount;
-var filteredTargetCount;
-var alarmTargetCount;
-var lastAlarmTime;
-// var tooltipList;
-var sortTableBy = "priority";
+const noSleep = new NoSleep();
+let collisionProfiles;
+let selfMmsi;
+let selfTarget;
+let offsetLatitude = 0;
+let offsetLongitude = 0;
+let disableMoveend = false;
+let disableMapPanTo = false;
+const targets = new Map();
+let pluginTargets;
+const boatMarkers = new Map();
+const boatProjectedCourseLines = new Map();
+const rangeRings = L.layerGroup();
+let selectedVesselMmsi;
+let blueBoxIcon;
+let blueCircle1;
+let blueCircle2;
+let validTargetCount;
+let filteredTargetCount;
+let alarmTargetCount;
+let lastAlarmTime;
+let tooltipList = [];
+let sortTableBy = "priority";
+let signalkWebSocket = null;
+let wsReconnectAttempts = 0;
 
-var blueLayerGroup = L.layerGroup();
-//blueLayerGroup.className = 'blueStuff';
+const blueLayerGroup = L.layerGroup();
 
 const bsModalAlert = new bootstrap.Modal("#modalAlert");
 const bsModalAlarm = new bootstrap.Modal("#modalAlarm");
@@ -79,16 +90,21 @@ if (!collisionProfiles.current) {
 document.getElementById("selectActiveProfile").value =
 	collisionProfiles.current;
 document.getElementById("checkNoSleep").checked =
-	localStorage.getItem("checkNoSleep") === "true";
+	localStorage.getItem(STORAGE_KEYS.NO_SLEEP) === "true";
+document.getElementById("checkDarkMode").checked =
+	localStorage.getItem(STORAGE_KEYS.DARK_MODE) === "true";
+document.getElementById("checkDebugStream").checked =
+	localStorage.getItem(STORAGE_KEYS.DEBUG_STREAM) === "true";
 configureNoSleep();
+applyColorMode();
 
-var charts = await getHttpResponse("/signalk/v1/api/resources/charts", {
+const charts = await getHttpResponse("/signalk/v1/api/resources/charts", {
 	throwErrors: false,
 	ignore404: true,
 	ignoreEmptyResponse: true,
 });
 
-var data = await getHttpResponse("/signalk/v1/api/vessels/self", {
+const data = await getHttpResponse("/signalk/v1/api/vessels/self", {
 	throwErrors: true,
 });
 selfMmsi = data.mmsi;
@@ -111,18 +127,18 @@ L.easyButton("bi bi-cursor-fill", (_btn, map) => {
 
 // protomaps color flavors: light dark white grayscale black
 // make water transparent so that bootstrap light/dark mode backgroud comes through
-var paintRules = protomapsL.paintRules({
+const paintRules = protomapsL.paintRules({
 	...basemaps.namedFlavor("light"),
 	water: "rgba(0,0,0,0)",
 });
-var labelRules = protomapsL.labelRules(basemaps.namedFlavor("light"));
+const labelRules = protomapsL.labelRules(basemaps.namedFlavor("light"));
 
-var osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
 	maxZoom: 19,
 	attribution: "© OpenStreetMap",
 });
 
-var openTopoMap = L.tileLayer(
+const openTopoMap = L.tileLayer(
 	"https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
 	{
 		maxZoom: 19,
@@ -131,7 +147,7 @@ var openTopoMap = L.tileLayer(
 	},
 );
 
-var satLayer = L.tileLayer(
+const satLayer = L.tileLayer(
 	"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
 	{
 		maxNativeZoom: 17,
@@ -140,14 +156,14 @@ var satLayer = L.tileLayer(
 	},
 );
 
-var naturalEarth10m = protomapsL.leafletLayer({
+const naturalEarth10m = protomapsL.leafletLayer({
 	url: pmtilesUrl,
 	maxDataZoom: 5,
 	paintRules: paintRules,
 	labelRules: labelRules,
 });
 
-var baseMaps = {
+const baseMaps = {
 	Empty: L.tileLayer(""),
 	OpenStreetMap: osm,
 	OpenTopoMap: openTopoMap,
@@ -155,8 +171,8 @@ var baseMaps = {
 	"NaturalEarth (offline)": naturalEarth10m,
 };
 
-var chart;
-var layer;
+let chart;
+let layer;
 for (const key in charts) {
 	chart = charts[key];
 	if (chart.format === "mvt") {
@@ -175,7 +191,7 @@ for (const key in charts) {
 	baseMaps[chart.name] = layer;
 }
 
-var OpenSeaMap = L.tileLayer(
+const OpenSeaMap = L.tileLayer(
 	"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
 	{
 		maxZoom: 19,
@@ -183,13 +199,13 @@ var OpenSeaMap = L.tileLayer(
 	},
 );
 
-var overlayMaps = {
+const overlayMaps = {
 	OpenSeaMap: OpenSeaMap,
 };
 
 L.control.layers(baseMaps, overlayMaps, { position: "topleft" }).addTo(map);
 
-var layerControlLayersToggleEl = document.getElementsByClassName(
+const layerControlLayersToggleEl = document.getElementsByClassName(
 	"leaflet-control-layers-toggle",
 )[0];
 
@@ -204,8 +220,8 @@ L.easyButton("bi bi-gear-fill", () => {
 }).addTo(map);
 
 // reload last used baselayer/overlay
-var baselayer = localStorage.getItem("baselayer");
-var overlay = localStorage.getItem("overlay");
+let baselayer = localStorage.getItem(STORAGE_KEYS.BASE_LAYER);
+const overlay = localStorage.getItem(STORAGE_KEYS.OVERLAY);
 if (!baseMaps[baselayer]) {
 	baselayer = "OpenStreetMap";
 }
@@ -243,13 +259,13 @@ blueLayerGroup.addLayer(blueCircle1);
 blueLayerGroup.addLayer(blueCircle2);
 
 // setup vessel label collision avoidance
-var hideLabel = (label) => {
+const hideLabel = (label) => {
 	label.labelObject.style.opacity = 0;
 };
-var showLabel = (label) => {
+const showLabel = (label) => {
 	label.labelObject.style.opacity = 1;
 };
-var labelToCollisionController = new labelgun.default(hideLabel, showLabel);
+const labelToCollisionController = new labelgun.default(hideLabel, showLabel);
 
 const alertPlaceholder = document.getElementById("alertPlaceholder");
 
@@ -314,6 +330,13 @@ document.addEventListener("fullscreenchange", fullscreenchangeHandler);
 
 //document.addEventListener("webkitfullscreenchange", fullscreenchangeHandler);
 
+document.getElementById("checkDebugStream").addEventListener("change", () => {
+	localStorage.setItem(STORAGE_KEYS.DEBUG_STREAM, checkDebugStream.checked);
+	if (!checkDebugStream.checked) {
+		map.attributionControl.setPrefix(false);
+	}
+});
+
 document
 	.getElementById("selectProfileToEdit")
 	.addEventListener("input", (ev) => {
@@ -339,7 +362,6 @@ document
 	.getElementById("buttonMuteToggle")
 	.addEventListener("click", handleButtonMuteToggle);
 
-document.getElementsByClassName("");
 // save config when offcanvasEditProfiles is closed
 offcanvasEditProfiles.addEventListener("hide.bs.offcanvas", () => {
 	saveCollisionProfiles();
@@ -347,7 +369,7 @@ offcanvasEditProfiles.addEventListener("hide.bs.offcanvas", () => {
 
 // show modalSelectedVesselProperties when modalClosebyBoats is closed
 modalClosebyBoats.addEventListener("hidden.bs.modal", () => {
-	var boatMarker = boatMarkers.get(selectedVesselMmsi);
+	const boatMarker = boatMarkers.get(selectedVesselMmsi);
 	positionModalWindow(boatMarker.getLatLng(), "modalSelectedVesselProperties");
 	showModalSelectVesselProperties(targets.get(selectedVesselMmsi));
 });
@@ -401,6 +423,7 @@ function fullscreenchangeHandler() {
 }
 
 function applyColorMode() {
+	localStorage.setItem(STORAGE_KEYS.DARK_MODE, checkDarkMode.checked);
 	if (checkDarkMode.checked) {
 		// dark mode
 		document.documentElement.setAttribute("data-bs-theme", "dark");
@@ -425,28 +448,38 @@ function configureNoSleep() {
 	} else {
 		noSleep.disable();
 	}
-	localStorage.setItem("checkNoSleep", checkNoSleep.checked);
+	localStorage.setItem(STORAGE_KEYS.NO_SLEEP, checkNoSleep.checked);
 }
 
 function handleBaseLayerChange(event) {
-	localStorage.setItem("baselayer", event.name);
+	localStorage.setItem(STORAGE_KEYS.BASE_LAYER, event.name);
 	applyColorMode();
 }
 
 function handleOverlayAdd(event) {
-	localStorage.setItem("overlay", event.name);
+	localStorage.setItem(STORAGE_KEYS.OVERLAY, event.name);
 	applyColorMode();
 }
 
 function handleOverlayRemove() {
-	localStorage.removeItem("overlay");
+	localStorage.removeItem(STORAGE_KEYS.OVERLAY);
 }
 
 // initialize profile edit screen on startup
 setupProfileEditView("anchor");
 
-refresh();
-setInterval(refresh, 1000);
+// Initial data load via HTTP
+await initialDataLoad();
+
+// Start streaming or polling based on configuration
+if (USE_WEBSOCKET_STREAMING) {
+	connectToSignalKStream();
+	// Still run UI updates on interval, but don't fetch data
+	setInterval(updateLoop, 1000);
+} else {
+	// Fall back to polling
+	setInterval(refresh, 1000);
+}
 
 function setupProfileEditView(profile) {
 	configWarningCpaRange.value = distanceToTick(
@@ -476,7 +509,7 @@ function setupProfileEditView(profile) {
 		collisionProfiles[profile].guard.speed,
 	);
 
-	var inputEvent = new Event("input");
+	const inputEvent = new Event("input");
 
 	configWarningCpaRange.dispatchEvent(inputEvent);
 	configWarningTcpaRange.dispatchEvent(inputEvent);
@@ -490,32 +523,54 @@ function setupProfileEditView(profile) {
 	configGuardSogRange.dispatchEvent(inputEvent);
 }
 
-async function saveCollisionProfiles() {
-	console.log("*** save collisionProfiles to server", collisionProfiles);
+/** Timer for debouncing collision profile saves */
+let saveCollisionProfilesTimer = null;
+const SAVE_DEBOUNCE_MS = 500;
 
-	// /plugins/${PLUGIN_ID}/setCollisionProfiles
-	var response = await fetch(`/plugins/${PLUGIN_ID}/setCollisionProfiles`, {
-		credentials: "include",
-		method: "PUT",
-		body: JSON.stringify(collisionProfiles),
-		headers: {
-			"Content-Type": "application/json",
-		},
-	});
-	if (response.status === 401) {
-		location.href = "/admin/#/login";
+/**
+ * Saves collision profiles to the server with debouncing.
+ * Multiple rapid calls will be coalesced into a single save.
+ */
+function saveCollisionProfiles() {
+	// Clear any existing timer
+	if (saveCollisionProfilesTimer) {
+		clearTimeout(saveCollisionProfilesTimer);
 	}
-	if (!response.ok) {
-		throw new Error(
-			`Error saving collisionProfiles. Response status: ${response.status} from ${response.url}`,
-		);
-	}
-	console.log("successfully saved config", collisionProfiles);
+
+	// Set new timer to save after debounce period
+	saveCollisionProfilesTimer = setTimeout(async () => {
+		console.log("*** save collisionProfiles to server", collisionProfiles);
+
+		try {
+			const response = await fetch(
+				`/plugins/${PLUGIN_ID}/setCollisionProfiles`,
+				{
+					credentials: "include",
+					method: "PUT",
+					body: JSON.stringify(collisionProfiles),
+					headers: {
+						"Content-Type": "application/json",
+					},
+				},
+			);
+			if (response.status === 401) {
+				location.href = "/admin/#/login";
+			}
+			if (!response.ok) {
+				throw new Error(
+					`Error saving collisionProfiles. Response status: ${response.status} from ${response.url}`,
+				);
+			}
+			console.log("successfully saved config", collisionProfiles);
+		} catch (error) {
+			console.error("Error saving collision profiles:", error);
+			showError(`Error saving settings: ${error.message}`);
+		}
+	}, SAVE_DEBOUNCE_MS);
 }
 
 function showError(message) {
-	//document.getElementById("errorMessage").textContent = message;
-	document.getElementById("errorMessage").innerHTML = message;
+	document.getElementById("errorMessage").textContent = message;
 	bsModalAlert.show();
 }
 
@@ -525,7 +580,7 @@ function handleTableOfTargetsBodyClick(ev) {
 	const mmsi = tr.dataset.mmsi;
 	const boatMarker = boatMarkers.get(mmsi);
 	selectBoatMarker(boatMarker);
-	// FIXME: maybe use blueLayerGroup here. looks like L.featureGroup would be what we need.
+	// Note: Could potentially use blueLayerGroup with L.featureGroup for better layer management
 	map.fitBounds([
 		boatMarker.getLatLng(),
 		boatMarkers.get(selfMmsi).getLatLng(),
@@ -543,16 +598,16 @@ function tickToDistance(tick) {
 }
 
 function processDistanceRangeControl(ev) {
-	var tick = ev.target.value;
-	var dataset = ev.target.dataset;
-	var valueStorageElement = document.getElementById(dataset.target);
+	const tick = ev.target.value;
+	const dataset = ev.target.dataset;
+	const valueStorageElement = document.getElementById(dataset.target);
 	// 0,0.1,0.2 ... 1.0,2,3,4,5,6,7,8,9,10
 	// 20 values
 	// tick                     distance
 	// 0 - 10   correspond to   0 - 1.0
 	// 11 - 19  correspond to   2 - 10
-	var distance = tickToDistance(tick);
-	var unitsSpan = document.getElementById(`${dataset.target}Units`);
+	const distance = tickToDistance(tick);
+	const unitsSpan = document.getElementById(`${dataset.target}Units`);
 
 	if (distance === 0) {
 		unitsSpan.hidden = true;
@@ -587,16 +642,16 @@ function tickToTime(tick) {
 }
 
 function processTcpaRangeControl(ev) {
-	var tick = ev.target.value;
-	var dataset = ev.target.dataset;
-	var valueStorageElement = document.getElementById(dataset.target);
+	const tick = ev.target.value;
+	const dataset = ev.target.dataset;
+	const valueStorageElement = document.getElementById(dataset.target);
 	// 1,2,3,4,  5,  10,15,  20,  30,40,50,60
 	// 12 values
 	// tick                     time (min)
 	// 1 - 5    correspond to   1 - 5
 	// 6 - 8    correspond to   10 - 20
 	// 9 - 12   correspond to   30 - 60
-	var time = tickToTime(tick);
+	const time = tickToTime(tick);
 	valueStorageElement.textContent = time;
 	collisionProfiles[selectProfileToEdit.value][dataset.alarmType][
 		dataset.alarmCriteria
@@ -624,9 +679,9 @@ function tickToSpeed(tick) {
 }
 
 function processSpeedRangeControl(ev) {
-	var tick = ev.target.value;
-	var dataset = ev.target.dataset;
-	var valueStorageElement = document.getElementById(dataset.target);
+	const tick = ev.target.value;
+	const dataset = ev.target.dataset;
+	const valueStorageElement = document.getElementById(dataset.target);
 	// 0,0.1,0,2 ... 0.5,1,2,3,5,10
 	// 11 values
 	// tick                     speed (knots)
@@ -636,7 +691,7 @@ function processSpeedRangeControl(ev) {
 	// 8        correspond to   3
 	// 9        correspond to   5
 	// 10       correspond to   10
-	var speed = tickToSpeed(tick);
+	const speed = tickToSpeed(tick);
 	valueStorageElement.textContent = speed;
 	collisionProfiles[selectProfileToEdit.value][dataset.alarmType][
 		dataset.alarmCriteria
@@ -650,11 +705,11 @@ function drawRangeRings() {
 	rangeRings.removeFrom(map);
 	rangeRings.clearLayers();
 
-	var mapHeightInNauticalMiles =
+	const mapHeightInNauticalMiles =
 		60 * Math.abs(map.getBounds().getNorth() - map.getBounds().getSouth());
 
 	// aiming for 3 visible range rings
-	var step = mapHeightInNauticalMiles / 6;
+	let step = mapHeightInNauticalMiles / 6;
 
 	if (step < 0.125) {
 		step = 0.125;
@@ -711,18 +766,206 @@ function drawRangeRings() {
 	rangeRings.addTo(map);
 }
 
+// Initial data load via HTTP (used once at startup)
+async function initialDataLoad() {
+	try {
+		let vessels = await getHttpResponse("/signalk/v1/api/vessels", {
+			throwErrors: true,
+		});
+
+		// we expect 404s from this when there are no atons:
+		const atons = await getHttpResponse("/signalk/v1/api/atons", {
+			ignore404: true,
+		});
+		vessels = Object.assign(vessels, atons);
+
+		ingestRawVesselData(vessels);
+		selfTarget = targets.get(selfMmsi);
+
+		// Get mute data from plugin
+		UpdateTargetsWithMuteDataFromPlugin();
+	} catch (error) {
+		console.error("Error in initialDataLoad:", error);
+		showError(`Error loading initial data: ${error}`);
+	}
+}
+
+/**
+ * Updates the connection status indicator in the UI.
+ * @param {"connected" | "disconnected" | "reconnecting"} status - Connection status
+ * @param {string} [message] - Optional message to display
+ */
+function updateConnectionStatus(status, message) {
+	const statusIndicator = document.getElementById("connectionStatus");
+	if (!statusIndicator) return;
+
+	statusIndicator.classList.remove(
+		"text-success",
+		"text-danger",
+		"text-warning",
+	);
+
+	switch (status) {
+		case "connected":
+			statusIndicator.classList.add("text-success");
+			statusIndicator.innerHTML =
+				'<i class="bi bi-wifi"></i> <span class="d-none d-sm-inline">Connected</span>';
+			statusIndicator.title = "Connected to SignalK";
+			break;
+		case "disconnected":
+			statusIndicator.classList.add("text-danger");
+			statusIndicator.innerHTML =
+				'<i class="bi bi-wifi-off"></i> <span class="d-none d-sm-inline">Offline</span>';
+			statusIndicator.title = message || "Disconnected from SignalK";
+			break;
+		case "reconnecting":
+			statusIndicator.classList.add("text-warning");
+			statusIndicator.innerHTML =
+				'<i class="bi bi-arrow-repeat"></i> <span class="d-none d-sm-inline">Reconnecting...</span>';
+			statusIndicator.title = message || "Attempting to reconnect...";
+			break;
+	}
+}
+
+// Connect to SignalK WebSocket stream for real-time updates
+function connectToSignalKStream() {
+	const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+	const wsUrl = `${wsProtocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
+
+	console.log("Connecting to SignalK stream:", wsUrl);
+	updateConnectionStatus("reconnecting", "Connecting...");
+	signalkWebSocket = new WebSocket(wsUrl);
+
+	signalkWebSocket.onopen = () => {
+		console.log("SignalK WebSocket connected");
+		wsReconnectAttempts = 0; // Reset backoff on successful connection
+		updateConnectionStatus("connected");
+
+		// Subscribe to vessel and aton data
+		const subscription = {
+			context: "*",
+			subscribe: [
+				{ path: "", period: 1000 },
+				{ path: "navigation.position", period: 1000 },
+				{ path: "navigation.courseOverGroundTrue", period: 1000 },
+				{ path: "navigation.speedOverGround", period: 1000 },
+				{ path: "navigation.headingTrue", period: 1000 },
+				{ path: "navigation.rateOfTurn", period: 1000 },
+				{ path: "navigation.state", period: 1000 },
+				{ path: "navigation.destination.commonName", period: 1000 },
+				{ path: "design.*", period: 1000 },
+				{ path: "sensors.ais.class", period: 1000 },
+				{ path: "atonType", period: 1000 },
+				{ path: "offPosition", period: 1000 },
+				{ path: "virtual", period: 1000 },
+			],
+		};
+		signalkWebSocket.send(JSON.stringify(subscription));
+	};
+
+	signalkWebSocket.onmessage = (event) => {
+		try {
+			const delta = JSON.parse(event.data);
+			if (delta.updates) {
+				handleDelta(delta);
+			}
+		} catch (error) {
+			console.error("Error processing WebSocket message:", error);
+		}
+	};
+
+	signalkWebSocket.onerror = (error) => {
+		console.error("SignalK WebSocket error:", error);
+		updateConnectionStatus("disconnected", "Connection error");
+	};
+
+	signalkWebSocket.onclose = () => {
+		wsReconnectAttempts++;
+		const delay = Math.min(
+			WS_RECONNECT_BASE_DELAY * Math.pow(2, wsReconnectAttempts - 1),
+			WS_RECONNECT_MAX_DELAY,
+		);
+		console.log(
+			`SignalK WebSocket closed, reconnecting in ${delay / 1000} seconds (attempt ${wsReconnectAttempts})...`,
+		);
+		updateConnectionStatus(
+			"reconnecting",
+			`Reconnecting in ${delay / 1000}s (attempt ${wsReconnectAttempts})`,
+		);
+		setTimeout(connectToSignalKStream, delay);
+	};
+}
+
+// Process delta messages from WebSocket stream - uses shared function from ais-utils.mjs
+function handleDelta(delta) {
+	processDelta(delta, targets);
+}
+
+// Update loop for streaming mode (no data fetching, just UI updates)
+function updateLoop() {
+	try {
+		const startTime = new Date();
+
+		validTargetCount = 0;
+		filteredTargetCount = 0;
+		alarmTargetCount = 0;
+
+		selfTarget = targets.get(selfMmsi);
+
+		try {
+			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+		} catch (error) {
+			console.error(error);
+			showError(`No GPS position available. Verify that you are connected to the
+                SignalK server and that the SignalK server has a position for your vessel.<br><br>
+                ${error}`);
+			return;
+		}
+
+		updateUI();
+
+		if (AGE_OUT_OLD_TARGETS) {
+			ageOutOldTargets();
+		}
+
+		if (
+			alarmTargetCount > 0 &&
+			(lastAlarmTime == null ||
+				Date.now() > lastAlarmTime + SHOW_ALARMS_INTERVAL)
+		) {
+			lastAlarmTime = Date.now();
+			showAlarms();
+		}
+
+		if (selfTarget?.lastSeen > GPS_STALE_WARNING_SECONDS) {
+			console.error(
+				`No GPS position received for more than ${selfTarget.lastSeen} seconds`,
+			);
+			showError(`No GPS position received for more than ${selfTarget.lastSeen} seconds. Verify that you are connected to the
+                SignalK server and that the SignalK server has a position for your vessel.`);
+		}
+
+		// display performance metrics
+		if (checkDebugStream.checked) {
+			const updateTimeInMillisecs = Date.now() - startTime.getTime();
+			map.attributionControl.setPrefix(
+				`${updateTimeInMillisecs} ms / ${targets.size} vessels incl. own (streaming)`,
+			);
+		}
+	} catch (error) {
+		console.error("Error in updateLoop:", error);
+	}
+}
+
+// Legacy polling refresh (fallback when streaming is disabled)
 async function refresh() {
 	try {
 		const startTime = new Date();
 
-		// FIXME switch to the streaming api? does it send atons?
-
 		let vessels = await getHttpResponse("/signalk/v1/api/vessels", {
 			throwErrors: true,
 		});
-		//console.log(vessels);
 
-		// we expect 404s from this when there are no atons:
 		const atons = await getHttpResponse("/signalk/v1/api/atons", {
 			ignore404: true,
 		});
@@ -740,12 +983,11 @@ async function refresh() {
 			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
 		} catch (error) {
 			console.error(error);
-			showError(`No GPS position available. Verify that you are connected to the 
+			showError(`No GPS position available. Verify that you are connected to the
                 SignalK server and that the SignalK server has a position for your vessel.<br><br>
                 ${error}`);
 		}
 
-		// we need to do this after we get the initial round of targets
 		UpdateTargetsWithMuteDataFromPlugin();
 
 		updateUI();
@@ -763,30 +1005,22 @@ async function refresh() {
 			showAlarms();
 		}
 
-		// show error if were not getting gps position updates
-		if (selfTarget.lastSeen > 20) {
+		if (selfTarget.lastSeen > GPS_STALE_WARNING_SECONDS) {
 			console.error(
 				`No GPS position received for more than ${selfTarget.lastSeen} seconds`,
 			);
-			showError(`No GPS position received for more than ${selfTarget.lastSeen} seconds. Verify that you are connected to the 
+			showError(`No GPS position received for more than ${selfTarget.lastSeen} seconds. Verify that you are connected to the
                 SignalK server and that the SignalK server has a position for your vessel.`);
 		}
 
-		// display performance metrics
-		let layers = 0;
-		map.eachLayer(() => {
-			layers++;
-		});
-		const updateTimeInMillisecs = Date.now() - startTime.getTime();
-		//console.log(updateTimeInMillisecs + ' msecs');
-		// FIXME this does not work in ios: performance.memory.usedJSHeapSize
-		// map.attributionControl.setPrefix(`${updateTimeInMillisecs} msecs / ${layers} layers / ${(performance.memory.usedJSHeapSize / Math.pow(1000, 2)).toFixed(1)} MB`);
-		map.attributionControl.setPrefix(
-			`${updateTimeInMillisecs} msecs / ${layers} layers`,
-		);
+		if (checkDebugStream.checked) {
+			const updateTimeInMillisecs = Date.now() - startTime.getTime();
+			map.attributionControl.setPrefix(
+				`${updateTimeInMillisecs} ms / ${targets.size} vessels incl. own`,
+			);
+		}
 	} catch (error) {
 		console.error("Error in refresh:", error);
-		//showError(`Encountered an error while refreshing: ${error}`);
 	}
 }
 
@@ -794,9 +1028,8 @@ function UpdateTargetsWithMuteDataFromPlugin() {
 	if (!pluginTargets) {
 		return;
 	}
-	var pluginTarget;
 	targets.forEach((target, mmsi) => {
-		pluginTarget = pluginTargets[mmsi];
+		const pluginTarget = pluginTargets[mmsi];
 
 		if (pluginTarget?.alarmIsMuted) {
 			console.log(
@@ -809,7 +1042,7 @@ function UpdateTargetsWithMuteDataFromPlugin() {
 }
 
 function showAlarms() {
-	var targetsWithAlarms = [];
+	const targetsWithAlarms = [];
 	targets.forEach((target) => {
 		if (target.isValid && target.alarmState && !target.alarmIsMuted) {
 			targetsWithAlarms.push(target);
@@ -817,16 +1050,20 @@ function showAlarms() {
 	});
 
 	if (targetsWithAlarms.length > 0) {
-		document.getElementById("alarmDiv").innerHTML = " ";
+		const alarmDiv = document.getElementById("alarmDiv");
+		alarmDiv.textContent = ""; // Clear safely
 		targetsWithAlarms.forEach((target) => {
-			var message = `${target.name} - ${target.alarmType.toUpperCase()} - `;
+			let message = `${target.name} - ${target.alarmType.toUpperCase()} - `;
 			if (target.alarmType.includes("cpa")) {
 				message += `${target.cpaFormatted} ${target.tcpaFormatted}`;
 			} else {
 				message += `${target.rangeFormatted}`;
 			}
-			document.getElementById("alarmDiv").innerHTML +=
-				`<div class="alert alert-danger" role="alert">${message}</div>`;
+			const alertDiv = document.createElement("div");
+			alertDiv.className = "alert alert-danger";
+			alertDiv.setAttribute("role", "alert");
+			alertDiv.textContent = message;
+			alarmDiv.appendChild(alertDiv);
 		});
 		bsModalAlarm.show();
 		new Audio(hornMp3Url).play();
@@ -849,15 +1086,15 @@ async function muteAllAlarms() {
 	});
 
 	// mute alarms in the plugin as well
-	// /plugins/${PLUGIN_ID}/muteAllAlarms
-	await getHttpResponse(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
-		throwErrors: true,
-		ignoreEmptyResponse: true,
+	// POST /plugins/${PLUGIN_ID}/muteAllAlarms
+	await fetch(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
+		credentials: "include",
+		method: "POST",
 	});
 }
 
 async function handleButtonMuteToggle() {
-	var target = targets.get(selectedVesselMmsi);
+	const target = targets.get(selectedVesselMmsi);
 	target.alarmIsMuted = !target.alarmIsMuted;
 	updateButtonMuteToggleIcon(target);
 	showAlert(`Target ${target.alarmIsMuted ? "" : "un"}muted`, "success");
@@ -869,11 +1106,13 @@ async function handleButtonMuteToggle() {
 		target.alarmIsMuted,
 	);
 
-	// GET /plugins/${plugin.id}/setAlarmIsMuted/:mmsi/:alarmIsMuted
-	await getHttpResponse(
-		`/plugins/${PLUGIN_ID}/setAlarmIsMuted/${target.mmsi}/${target.alarmIsMuted}`,
-		{ throwErrors: true, ignoreEmptyResponse: true },
-	);
+	// PUT /plugins/${PLUGIN_ID}/setAlarmIsMuted
+	await fetch(`/plugins/${PLUGIN_ID}/setAlarmIsMuted`, {
+		credentials: "include",
+		method: "PUT",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ mmsi: target.mmsi, alarmIsMuted: target.alarmIsMuted }),
+	});
 }
 
 function updateButtonMuteToggleIcon(target) {
@@ -887,18 +1126,26 @@ function updateButtonMuteToggleIcon(target) {
 }
 
 function showAlert(message, type) {
-	alertPlaceholder.innerHTML = [
-		`<div class="alert alert-${type} alert-dismissible" role="alert">`,
-		`   <div>${message}</div>`,
-		'   <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>',
-		"</div>",
-	].join("");
+	alertPlaceholder.textContent = ""; // Clear safely
+	const alertDiv = document.createElement("div");
+	alertDiv.className = `alert alert-${type} alert-dismissible`;
+	alertDiv.setAttribute("role", "alert");
+	const messageDiv = document.createElement("div");
+	messageDiv.textContent = message;
+	alertDiv.appendChild(messageDiv);
+	const closeButton = document.createElement("button");
+	closeButton.type = "button";
+	closeButton.className = "btn-close";
+	closeButton.setAttribute("data-bs-dismiss", "alert");
+	closeButton.setAttribute("aria-label", "Close");
+	alertDiv.appendChild(closeButton);
+	alertPlaceholder.appendChild(alertDiv);
 }
 
 // get vessel data into an easier to access data model
 // values in their original data types - no text formatting of numeric values here
 function ingestRawVesselData(vessels) {
-	for (var vesselId in vessels) {
+	for (const vesselId in vessels) {
 		const vessel = vessels[vesselId];
 
 		let target = targets.get(vessel.mmsi);
@@ -915,7 +1162,7 @@ function ingestRawVesselData(vessels) {
 			continue;
 		}
 
-		target.mmsi = vessel.mmsi;
+		target.mmsi = String(vessel.mmsi);
 		target.name = vessel.name || `<${vessel.mmsi}>`;
 		target.sog = vessel.navigation?.speedOverGround?.value;
 		target.cog = vessel.navigation?.courseOverGroundTrue?.value;
@@ -941,7 +1188,7 @@ function ingestRawVesselData(vessels) {
 		target.latitude = vessel.navigation?.position?.value.latitude;
 		target.longitude = vessel.navigation?.position?.value.longitude;
 
-		// FIXME - override gps for testing with signalk team sample data (netherlands)
+		// For testing: can override GPS with SignalK team sample data (Netherlands region)
 		// if (target.mmsi == selfMmsi) {
 		//     target.latitude = 53.44;
 		//     target.longitude = 4.86 //5.07;
@@ -998,7 +1245,7 @@ function updateSelectedVesselProperties(target) {
 
 	activateToolTips();
 
-	var classARows = document.querySelectorAll(".ais-class-a");
+	const classARows = document.querySelectorAll(".ais-class-a");
 
 	// show/hide class A fields:
 	if (target.aisClass === "A") {
@@ -1008,7 +1255,7 @@ function updateSelectedVesselProperties(target) {
 	}
 
 	// show/hide alert:
-	var selectedVesselAlert = document.getElementById("selectedVesselAlert");
+	const selectedVesselAlert = document.getElementById("selectedVesselAlert");
 
 	if (target.alarmState === "danger") {
 		selectedVesselAlert.classList.remove("alert-warning");
@@ -1026,20 +1273,16 @@ function updateSelectedVesselProperties(target) {
 	}
 }
 
-// function deactivateToolTips() {
-// 	if (tooltipList) {
-// 		tooltipList.forEach((tooltip) => {
-// 			tooltip.dispose();
-// 		});
-// 	}
-// }
-
 function activateToolTips() {
+	// Dispose old tooltips to prevent memory leaks
+	tooltipList.forEach((tooltip) => {
+		tooltip.dispose();
+	});
+
 	const tooltipTriggerList = document.querySelectorAll(
 		'[data-bs-toggle="tooltip"]',
 	);
-	// const tooltipList =
-	[...tooltipTriggerList].map(
+	tooltipList = [...tooltipTriggerList].map(
 		(tooltipTriggerEl) => new bootstrap.Tooltip(tooltipTriggerEl),
 	);
 }
@@ -1091,25 +1334,7 @@ function updateUI() {
 }
 
 function updateTableOfTargets() {
-	var targetsArray = Array.from(targets.values());
-
-	// NOTE - For testing table column widths
-	// targetsArray.push({
-	// 	mmsi: "333333333",
-	// 	name: "ADRIATIC HIGHWAY",
-	// 	isValid: true,
-	// 	cpa: 99999,
-	// 	tcpa: 99999,
-	// 	range: 99999,
-	// 	order: 99999,
-	// 	alarmState: null,
-	// 	cpaFormatted: "99.9 NM",
-	// 	tcpaFormatted: "99:99:99",
-	// 	rangeFormatted: "99.99 NM",
-	// 	bearingFormatted: "999 T",
-	// 	sogFormatted: "99.9 kn",
-	// 	cogFormatted: "999 T",
-	// });
+	const targetsArray = Array.from(targets.values());
 
 	targetsArray.sort((a, b) => {
 		try {
@@ -1130,44 +1355,66 @@ function updateTableOfTargets() {
 		}
 	});
 
-	var tableBody = "";
-	var rowCount = 0;
+	const fragment = document.createDocumentFragment();
+	let rowCount = 0;
 
-	for (var target of targetsArray) {
+	for (const target of targetsArray) {
 		if (target.mmsi !== selfMmsi && target.isValid) {
-			tableBody += `
-                <tr class="${
-									target.alarmState === "danger"
-										? "table-danger"
-										: target.alarmState === "warning"
-											? "table-warning"
-											: ""
-								}" data-mmsi="${target.mmsi}">
-					<td scope="row">
-						${getTargetSvg(target)}
-					</td>
-					<th>
-						${target.name} ${target.alarmIsMuted ? '<i class="bi bi-volume-mute-fill"></i>' : ""}
-					</th>
-					<td class="text-end">${target.bearingFormatted}</td>
-					<td class="text-end">${target.rangeFormatted}</td>
-					<td class="text-end">${target.sogFormatted}</td>
-					<td class="text-end">${target.cpa ? target.cpaFormatted : ""}</td>
-					<td class="text-end">${target.cpa ? target.tcpaFormatted : ""}</td>
-                </tr>`;
+			const tr = document.createElement("tr");
+			if (target.alarmState === "danger") {
+				tr.className = "table-danger";
+			} else if (target.alarmState === "warning") {
+				tr.className = "table-warning";
+			}
+			tr.dataset.mmsi = target.mmsi;
+
+			// Icon cell
+			const iconTd = document.createElement("td");
+			iconTd.setAttribute("scope", "row");
+			iconTd.innerHTML = getTargetSvg(target); // SVG content is safe (from our code)
+			tr.appendChild(iconTd);
+
+			// Name cell
+			const nameTh = document.createElement("th");
+			nameTh.textContent = target.name;
+			if (target.alarmIsMuted) {
+				const muteIcon = document.createElement("i");
+				muteIcon.className = "bi bi-volume-mute-fill";
+				nameTh.appendChild(document.createTextNode(" "));
+				nameTh.appendChild(muteIcon);
+			}
+			tr.appendChild(nameTh);
+
+			// Data cells
+			const cells = [
+				target.bearingFormatted,
+				target.rangeFormatted,
+				target.sogFormatted,
+				target.cpa ? target.cpaFormatted : "",
+				target.cpa ? target.tcpaFormatted : "",
+			];
+			for (const cellText of cells) {
+				const td = document.createElement("td");
+				td.className = "text-end";
+				td.textContent = cellText;
+				tr.appendChild(td);
+			}
+
+			fragment.appendChild(tr);
 			rowCount++;
-			// <td>${target.order}</td>
 		}
 	}
 
-	document.getElementById("tableOfTargetsBody").innerHTML = tableBody;
+	const tableBody = document.getElementById("tableOfTargetsBody");
+	tableBody.textContent = ""; // Clear safely
+	tableBody.appendChild(fragment);
 	document.getElementById("numberOfAisTargets").textContent = rowCount;
 }
 
 function getTargetSvg(target) {
 	// fishing
 	if (target.typeId === 30) {
-		targetSvgs.fishingboatSvg;
+		return targetSvgs.fishingboatSvg;
 	}
 
 	// sailing
@@ -1216,8 +1463,8 @@ function updateSingleVesselUI(target) {
 		return;
 	}
 
-	var boatMarker = boatMarkers.get(target.mmsi);
-	var boatProjectedCourseLine = boatProjectedCourseLines.get(target.mmsi);
+	let boatMarker = boatMarkers.get(target.mmsi);
+	let boatProjectedCourseLine = boatProjectedCourseLines.get(target.mmsi);
 
 	if (!boatMarker) {
 		const icon = getTargetIcon(target, false, "gray");
@@ -1251,8 +1498,8 @@ function updateSingleVesselUI(target) {
 
 	boatMarker.setLatLng([target.latitude, target.longitude]);
 
-	var vesselIconColor;
-	var vesselIconIsLarge;
+	let vesselIconColor;
+	let vesselIconIsLarge;
 
 	if (target.mmsi === selectedVesselMmsi) {
 		vesselIconColor = "blue";
@@ -1278,7 +1525,7 @@ function updateSingleVesselUI(target) {
 	// store the whole vessel data model on the boat marker
 	boatMarker.mmsi = target.mmsi;
 
-	// FIXME add aton data for popup: isOffposition? or do the yellow box?
+	// Future: Add ATON-specific data for popup (isOffPosition indicator, yellow box styling)
 
 	if (target.mmsi !== selfMmsi) {
 		// update counts
@@ -1309,7 +1556,7 @@ function updateSingleVesselUI(target) {
 
 	// if this is our vessel and another vessel has been selected
 	// draw a solid blue line to cpa point from our vessel
-	// FIXME: the problem with this is that we process our vessel first. so the selected vessel wont be in targets yet: & targets.has(selectedVesselMmsi)
+	// Note: Self vessel is processed first, so selected vessel may not be in targets yet during initial load
 	if (target.mmsi === selfMmsi && selectedVesselMmsi) {
 		//console.log(selectedVesselMmsi, targets.get(selectedVesselMmsi));
 		const projectedCpaLocation = projectedLocation(
@@ -1414,7 +1661,10 @@ function ageOutOldTargets() {
 			}
 
 			if (boatMarkers.has(mmsi)) {
-				boatMarkers.get(mmsi).removeFrom(map);
+				const marker = boatMarkers.get(mmsi);
+				marker.unbindTooltip(); // Prevent memory leak
+				marker.off(); // Remove all event listeners
+				marker.removeFrom(map);
 				boatMarkers.delete(mmsi);
 			}
 
@@ -1430,13 +1680,13 @@ function ageOutOldTargets() {
 
 function boatClicked(event) {
 	//console.log('event', event);
-	var boatMarker = event.target;
-	var closebyBoatMarkers = findClosebyBoats(event.latlng);
+	const boatMarker = event.target;
+	const closebyBoatMarkers = findClosebyBoats(event.latlng);
 	if (closebyBoatMarkers.length > 1) {
 		closebyBoatMarkers.sort((a, b) => a.distanceInPixels - b.distanceInPixels);
 
 		const div = document.getElementById("listOfClosebyBoats");
-		div.innerHTML = "";
+		div.textContent = "";
 		let target;
 		let a;
 
@@ -1473,18 +1723,18 @@ function boatClicked(event) {
 
 function showModalSelectVesselProperties(target) {
 	updateSelectedVesselProperties(target);
-	alertPlaceholder.innerHTML = "";
+	alertPlaceholder.textContent = "";
 	bsModalSelectedVesselProperties.show();
 }
 
 function positionModalWindow(latLng, modalId) {
-	var clickedBoatMarkerLocationInPixels = map.latLngToContainerPoint(latLng);
-	var mapWidthInPixels = document.getElementById("map").clientWidth;
+	const clickedBoatMarkerLocationInPixels = map.latLngToContainerPoint(latLng);
+	const mapWidthInPixels = document.getElementById("map").clientWidth;
 
 	// if its a narrow screen, show modal in the default centered manner
 	// if boat is right of center, place modal on left
 	// if boat is left of center, place modal on right
-	var modalDialog = document.getElementById(modalId).children[0];
+	const modalDialog = document.getElementById(modalId).children[0];
 	if (mapWidthInPixels > 600) {
 		if (clickedBoatMarkerLocationInPixels.x > mapWidthInPixels / 2) {
 			modalDialog.style.marginLeft = "100px";
@@ -1499,19 +1749,19 @@ function positionModalWindow(latLng, modalId) {
 }
 
 function findClosebyBoats(latLng) {
-	var mapHeightInPixels = map.getSize().y;
-	var mapHeightInMeters =
+	const mapHeightInPixels = map.getSize().y;
+	const mapHeightInMeters =
 		Math.abs(map.getBounds().getNorth() - map.getBounds().getSouth()) *
 		60 *
 		METERS_PER_NM;
-	var mapScaleMetersPerPixel = mapHeightInMeters / mapHeightInPixels;
-	var closebyBoatMarkers = [];
+	const mapScaleMetersPerPixel = mapHeightInMeters / mapHeightInPixels;
+	const closebyBoatMarkers = [];
 	boatMarkers.forEach((boatMarker, mmsi) => {
 		if (mmsi === selfMmsi) {
 			return;
 		}
-		var distanceInMeters = latLng.distanceTo(boatMarker.getLatLng());
-		var distanceInPixels = distanceInMeters / mapScaleMetersPerPixel;
+		const distanceInMeters = latLng.distanceTo(boatMarker.getLatLng());
+		const distanceInPixels = distanceInMeters / mapScaleMetersPerPixel;
 		if (distanceInPixels < 30) {
 			boatMarker.distanceInPixels = distanceInPixels;
 			closebyBoatMarkers.push(boatMarker);
@@ -1523,7 +1773,7 @@ function findClosebyBoats(latLng) {
 
 function handleListOfClosebyBoatsClick(event) {
 	//console.log(event);
-	var boatMarker = boatMarkers.get(event.target.dataset.mmsi);
+	const boatMarker = boatMarkers.get(event.target.dataset.mmsi);
 	selectBoatMarker(boatMarker);
 }
 
@@ -1534,14 +1784,6 @@ function selectBoatMarker(boatMarker) {
 		return;
 	}
 
-	// clear previous blue box
-	// if (blueBoxIcon) {
-	//     blueBoxIcon.removeFrom(map);
-	//     console.log('about to remove blueCircle1', blueCircle1);
-	//     blueCircle1.removeFrom(map);
-	//     blueCircle2.removeFrom(map);
-	// }
-
 	// add blue box to selected boat marker
 	blueBoxIcon.setLatLng(boatMarker.getLatLng());
 	blueBoxIcon.addTo(map);
@@ -1549,7 +1791,7 @@ function selectBoatMarker(boatMarker) {
 	// bring boat to front - on top of the blue box - so that the boat can be clicked rather than the blue box
 	boatMarker.setZIndexOffset(1000);
 
-	var oldSelectedVesselMmsi;
+	let oldSelectedVesselMmsi;
 
 	// get vessel that was selected before this new selection (if any)
 	if (selectedVesselMmsi) {
@@ -1562,15 +1804,12 @@ function selectBoatMarker(boatMarker) {
 	if (oldSelectedVesselMmsi) {
 		updateSingleVesselUI(targets.get(oldSelectedVesselMmsi));
 	}
-
-	// FIXME blueLayerGroup.addTo(map);
 }
 
 function handleMapClick() {
 	blueBoxIcon.removeFrom(map);
 	blueCircle1.removeFrom(map);
 	blueCircle2.removeFrom(map);
-	//blueLayerGroup.removeFrom(map);
 
 	if (selectedVesselMmsi) {
 		// update selected vessel (remove blue):
@@ -1597,7 +1836,7 @@ function getTargetIcon(target, isLarge, color) {
 		target.mmsi.startsWith("972") ||
 		target.mmsi.startsWith("974")
 	) {
-		aisIons.getSartIcon();
+		return aisIons.getSartIcon();
 	}
 	// 99MIDXXXX        Aids to Navigation
 	else if (target.aisClass === "ATON" || target.mmsi.startsWith("99")) {
@@ -1618,7 +1857,7 @@ function getTargetIcon(target, isLarge, color) {
 }
 
 function addLabelToCollisionController(layer, id, weight) {
-	var label = layer.getTooltip()._source._tooltip._container;
+	const label = layer.getTooltip()._source._tooltip._container;
 	if (label) {
 		const rect = label.getBoundingClientRect();
 
