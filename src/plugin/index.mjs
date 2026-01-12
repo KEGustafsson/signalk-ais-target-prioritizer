@@ -515,8 +515,8 @@ export default function (app) {
 						{
 							path: "navigation.closestApproach",
 							value: {
-								distance: target.cpa,
-								timeTo: target.tcpa,
+								cpa: target.cpa,
+								tcpa: target.tcpa,
 								range: target.range,
 								bearing: target.bearing,
 								collisionRiskRating: target.order,
