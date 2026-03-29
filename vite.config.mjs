@@ -12,7 +12,7 @@ export default defineConfig({
 		preprocessorOptions: {
 			scss: {
 				// Silence deprecation warnings from Bootstrap's SCSS
-				silenceDeprecations: ["import", "global-builtin", "color-functions"],
+				silenceDeprecations: ["import", "global-builtin", "color-functions", "if-function"],
 			},
 		},
 	},

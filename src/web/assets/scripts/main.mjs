@@ -882,7 +882,7 @@ function connectToSignalKStream() {
 	signalkWebSocket.onclose = () => {
 		wsReconnectAttempts++;
 		const delay = Math.min(
-			WS_RECONNECT_BASE_DELAY * Math.pow(2, wsReconnectAttempts - 1),
+			WS_RECONNECT_BASE_DELAY * 2 ** (wsReconnectAttempts - 1),
 			WS_RECONNECT_MAX_DELAY,
 		);
 		console.log(
