@@ -1,2 +1,17 @@
-# when .npmignore is empty, all files are included in the npm pack - overriding .gitignore. 
+# when .npmignore is empty, all files are included in the npm pack - overriding .gitignore.
 # so this is useful for including /dist or /public for example - when they are excluded by .gitignore.
+
+# Dev tooling
+.claude/
+.vscode/
+biome.json
+vite.config.mjs
+rollup.config.mjs
+package-lock.json
+
+# Source files (built output in /plugin and /public is what's needed)
+src/
+
+# Notes and resources (docs/images not needed at runtime)
+notes/
+resources/
