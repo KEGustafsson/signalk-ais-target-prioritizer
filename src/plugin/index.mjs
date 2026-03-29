@@ -11,6 +11,7 @@ import {
 import {
 	TARGET_MAX_AGE,
 	PUBLISH_THRESHOLDS,
+	GPS_STALE_WARNING_SECONDS,
 } from "../shared/constants.mjs";
 import schema from "./schema.json" with { type: "json" };
 import * as vesper from "./vesper-xb8000-emulator.mjs";
@@ -26,7 +27,11 @@ let selfCallsign;
 let selfTypeId;
 let selfTarget;
 
+const NOTIFICATION_PATH = "notifications.navigation.closestApproach";
+const CLEAR_NOTIFICATION_MESSAGE = "watching";
+
 const targets = new Map();
+let lastPublishedNotification = { state: "normal", message: CLEAR_NOTIFICATION_MESSAGE };
 let collisionProfiles;
 let options;
 
@@ -41,6 +46,7 @@ export default function (app) {
 
 	plugin.start = (_options) => {
 		app.debug(`*** Starting plugin ${plugin.id} with options=`, _options);
+		lastPublishedNotification = { state: "normal", message: CLEAR_NOTIFICATION_MESSAGE };
 		options = _options;
 		getCollisionProfiles();
 		if (
@@ -74,6 +80,10 @@ export default function (app) {
 		app.debug(`Stopping plugin ${plugin.id}`);
 		unsubscribes.forEach((f) => f());
 		unsubscribes = [];
+		if (options?.enableAlarmPublishing && lastPublishedNotification.state !== "normal") {
+			sendNotification("normal", CLEAR_NOTIFICATION_MESSAGE);
+		}
+		lastPublishedNotification = { state: "normal", message: CLEAR_NOTIFICATION_MESSAGE };
 		if (options?.enableEmulator) {
 			vesper.stop();
 		}
@@ -358,20 +368,13 @@ export default function (app) {
 					}
 
 					// Process all targets for alarms and publishing
-					let isCurrentAlarm = false;
 					targets.forEach((t, tMmsi) => {
 						if (tMmsi !== selfMmsi) {
 							processTargetUpdate(t, tMmsi);
-							if (t.alarmState && !t.alarmIsMuted) {
-								isCurrentAlarm = true;
-							}
 						}
 					});
-
-					// Clear alarm notification if no active alarms
-					if (!isCurrentAlarm && isCurrentAlarmNotification()) {
-						sendNotification("normal", "watching");
-					}
+					syncAlarmNotificationState();
+					app.setPluginStatus(`Watching ${targets.size - 1} targets`);
 					return;
 				} else {
 					// Only recalculate the changed target
@@ -397,6 +400,8 @@ export default function (app) {
 
 				// Process alarms and publishing for changed target
 				processTargetUpdate(target, mmsi);
+				syncAlarmNotificationState();
+				app.setPluginStatus(`Watching ${targets.size - 1} targets`);
 			},
 		);
 	}
@@ -407,12 +412,18 @@ export default function (app) {
 	function processTargetUpdate(target, mmsi) {
 		if (mmsi === selfMmsi) return;
 
+		// Age out old targets regardless of GPS state
+		if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
+			app.debug("ageing out target", target.mmsi, target.name, target.lastSeen);
+			targets.delete(target.mmsi);
+			return;
+		}
+
 		// Check for stale GPS
-		if (selfTarget?.lastSeen > 30) {
-			const message = `No GPS position received for more than ${selfTarget.lastSeen} seconds`;
+		if (selfTarget?.lastSeen > GPS_STALE_WARNING_SECONDS) {
+			const message = `No GPS position received for more than ${GPS_STALE_WARNING_SECONDS} seconds`;
 			app.debug(message);
 			app.setPluginError(message);
-			sendNotification("alarm", message);
 			return;
 		}
 
@@ -427,39 +438,6 @@ export default function (app) {
 				target.lastPublishedAlarmState = target.alarmState;
 			}
 		}
-
-		// Handle alarm notifications
-		if (options.enableAlarmPublishing && target.alarmState && !target.alarmIsMuted) {
-			const alarmStateChanged =
-				target.alarmState !== target.lastNotifiedAlarmState ||
-				target.alarmType !== target.lastNotifiedAlarmType;
-
-			if (alarmStateChanged) {
-				const message = (
-					`${target.name || `<${target.mmsi}>`} - ` +
-					`${target.alarmType} ` +
-					`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
-				).toUpperCase();
-				if (target.alarmState === "warning") {
-					sendNotification("warn", message);
-				} else if (target.alarmState === "danger") {
-					sendNotification("alarm", message);
-				}
-				target.lastNotifiedAlarmState = target.alarmState;
-				target.lastNotifiedAlarmType = target.alarmType;
-			}
-		} else if (target.lastNotifiedAlarmState) {
-			target.lastNotifiedAlarmState = null;
-			target.lastNotifiedAlarmType = null;
-		}
-
-		// Age out old targets
-		if (AGE_OUT_OLD_TARGETS && target.lastSeen > TARGET_MAX_AGE) {
-			app.debug("ageing out target", target.mmsi, target.name, target.lastSeen);
-			targets.delete(target.mmsi);
-		}
-
-		app.setPluginStatus(`Watching ${targets.size - 1} targets`);
 	}
 
 
@@ -555,12 +533,13 @@ export default function (app) {
 
 	function sendNotification(state, message) {
 		app.debug("sendNotification", state, message);
-		const delta = {
+		lastPublishedNotification = { state, message };
+		app.handleMessage(plugin.id, {
 			updates: [
 				{
 					values: [
 						{
-							path: "notifications.navigation.closestApproach",
+							path: NOTIFICATION_PATH,
 							value: {
 								state: state,
 								method: ["visual", "sound"],
@@ -570,16 +549,83 @@ export default function (app) {
 					],
 				},
 			],
-		};
-
-		app.handleMessage(plugin.id, delta);
+		});
 	}
 
-	function isCurrentAlarmNotification() {
-		const notifications = app.getSelfPath(
-			"notifications.navigation.closestApproach",
-		);
-		return notifications?.value?.state === "alarm";
+	function buildAlarmMessage(target) {
+		return (
+			`${target.name || `<${target.mmsi}>`} - ` +
+			`${target.alarmType} ` +
+			`${target.alarmState === "danger" ? "alarm" : target.alarmState}`
+		).toUpperCase();
+	}
+
+	function getTopPriorityAlarmTarget() {
+		let topTarget = null;
+		targets.forEach((target, mmsi) => {
+			if (mmsi === selfMmsi || !target.alarmState || target.alarmIsMuted) {
+				return;
+			}
+			if (!topTarget) {
+				topTarget = target;
+				return;
+			}
+			const isHigherState =
+				target.alarmState === "danger" && topTarget.alarmState !== "danger";
+			const isSameStateHigherPriority =
+				target.alarmState === topTarget.alarmState &&
+				target.order != null &&
+				topTarget.order != null &&
+				target.order < topTarget.order;
+			if (isHigherState || isSameStateHigherPriority) {
+				topTarget = target;
+			}
+		});
+		return topTarget;
+	}
+
+	function getSystemAlarmNotification() {
+		if (selfTarget?.lastSeen > GPS_STALE_WARNING_SECONDS) {
+			return {
+				state: "alarm",
+				message: `No GPS position received for more than ${GPS_STALE_WARNING_SECONDS} seconds`,
+			};
+		}
+		return null;
+	}
+
+	function syncAlarmNotificationState() {
+		if (!options.enableAlarmPublishing) {
+			return;
+		}
+
+		const systemAlarm = getSystemAlarmNotification();
+		if (systemAlarm) {
+			if (
+				lastPublishedNotification.state !== systemAlarm.state ||
+				lastPublishedNotification.message !== systemAlarm.message
+			) {
+				sendNotification(systemAlarm.state, systemAlarm.message);
+			}
+			return;
+		}
+
+		const topAlarmTarget = getTopPriorityAlarmTarget();
+		if (!topAlarmTarget) {
+			if (lastPublishedNotification.state !== "normal") {
+				sendNotification("normal", CLEAR_NOTIFICATION_MESSAGE);
+			}
+			return;
+		}
+
+		const desiredState = topAlarmTarget.alarmState === "danger" ? "alarm" : "warn";
+		const desiredMessage = buildAlarmMessage(topAlarmTarget);
+		if (
+			lastPublishedNotification.state !== desiredState ||
+			lastPublishedNotification.message !== desiredMessage
+		) {
+			sendNotification(desiredState, desiredMessage);
+		}
 	}
 
 	return plugin;
