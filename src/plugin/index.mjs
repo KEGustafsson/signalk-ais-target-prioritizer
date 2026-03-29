@@ -21,6 +21,23 @@ const AGE_OUT_OLD_TARGETS = true;
 /** Regular expression for validating MMSI format (9 digits) */
 const MMSI_REGEX = /^[0-9]{9}$/;
 
+const VALID_PROFILE_NAMES = ["anchor", "harbor", "coastal", "offshore"];
+
+function isValidProfileShape(p) {
+	const isNonNegativeNumber = (v) => typeof v === "number" && isFinite(v) && v >= 0;
+	return (
+		p != null &&
+		isNonNegativeNumber(p.warning?.cpa) &&
+		isNonNegativeNumber(p.warning?.tcpa) &&
+		isNonNegativeNumber(p.warning?.speed) &&
+		isNonNegativeNumber(p.danger?.cpa) &&
+		isNonNegativeNumber(p.danger?.tcpa) &&
+		isNonNegativeNumber(p.danger?.speed) &&
+		isNonNegativeNumber(p.guard?.range) &&
+		isNonNegativeNumber(p.guard?.speed)
+	);
+}
+
 let selfMmsi;
 let selfName;
 let selfCallsign;
@@ -105,17 +122,17 @@ export default function (app) {
 			// do some basic validation to ensure we have some real config data before saving it
 			if (
 				!newCollisionProfiles ||
-				!newCollisionProfiles.current ||
-				!newCollisionProfiles.anchor ||
-				!newCollisionProfiles.harbor ||
-				!newCollisionProfiles.coastal ||
-				!newCollisionProfiles.offshore
+				!VALID_PROFILE_NAMES.includes(newCollisionProfiles.current) ||
+				!isValidProfileShape(newCollisionProfiles.anchor) ||
+				!isValidProfileShape(newCollisionProfiles.harbor) ||
+				!isValidProfileShape(newCollisionProfiles.coastal) ||
+				!isValidProfileShape(newCollisionProfiles.offshore)
 			) {
 				app.error(
 					"ERROR - not saving invalid new collision profiles",
 					newCollisionProfiles,
 				);
-				res.status(500).end();
+				res.status(400).end();
 				return;
 			}
 			// must use Object.assign rather than "collisionProfiles = newCollisionProfiles" to prevent breaking the reference we passed into the vesper emulator

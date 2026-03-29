@@ -462,7 +462,7 @@ function getTargetsXml() {
 <MMSI>${target.mmsi}</MMSI>
 <Name>${xmlescape(target.name) || ""}</Name>
 <CallSign>${xmlescape(target.callsign) || ""}</CallSign> 
-<VesselTypeString>${target.type || ""}</VesselTypeString>
+<VesselTypeString>${xmlescape(target.type) || ""}</VesselTypeString>
 <VesselType>${target.typeId || ""}</VesselType>
 <TargetType>${target.vesperTargetType || ""}</TargetType>
 <Order>${target.order || ""}</Order>
@@ -528,7 +528,7 @@ function getTargetDetailsXml(mmsi) {
 <MMSI>${mmsi || ""}</MMSI>
 <Name>${xmlescape(target.name) || ""}</Name>
 <CallSign>${xmlescape(target.callsign) || ""}</CallSign> 
-<VesselTypeString>${target.type || ""}</VesselTypeString>
+<VesselTypeString>${xmlescape(target.type) || ""}</VesselTypeString>
 <VesselType>${target.typeId || ""}</VesselType>
 <TargetType>${target.vesperTargetType || ""}</TargetType>
 <Order>${target.order || ""}</Order>
@@ -553,8 +553,8 @@ function getOwnStaticDataXml() {
 <Watchmate version='1.0' priority='0'>
 <OwnStaticData>
 <MMSI>${selfMmsi}</MMSI>
-<Name>${selfName}</Name>
-<CallSign>${selfCallsign}</CallSign>
+<Name>${xmlescape(selfName) || ""}</Name>
+<CallSign>${xmlescape(selfCallsign) || ""}</CallSign>
 <VesselType>${selfTypeId}</VesselType>
 <VesselSize a='1' b='1' c='1' d='1'/>
 </OwnStaticData>

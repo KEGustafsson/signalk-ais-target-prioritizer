@@ -1,3 +1,4 @@
 node_modules
 /public
 /plugin
+.claude/settings.local.json

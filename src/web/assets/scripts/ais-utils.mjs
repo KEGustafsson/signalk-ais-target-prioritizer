@@ -42,9 +42,11 @@ export function processDelta(delta, targets) {
 				case "":
 					if (value.value?.name) {
 						target.name = value.value.name;
-					} else if (value.value?.communication?.callsignVhf) {
+					}
+					if (value.value?.communication?.callsignVhf) {
 						target.callsign = value.value.communication.callsignVhf;
-					} else if (value.value?.registrations?.imo) {
+					}
+					if (value.value?.registrations?.imo) {
 						target.imo = value.value.registrations.imo.replace(/imo/i, "");
 					}
 					break;
@@ -410,6 +412,13 @@ function dist(u, v) {
 
 function evaluateAlarms(target, collisionProfiles) {
 	try {
+		const profile = collisionProfiles[collisionProfiles.current];
+		if (!profile?.guard || !profile?.warning || !profile?.danger) {
+			target.alarmComputationError = true;
+			return;
+		}
+		target.alarmComputationError = false;
+
 		// guard alarm
 		target.guardAlarm =
 			target.range != null &&
@@ -555,6 +564,7 @@ function evaluateAlarms(target, collisionProfiles) {
 		);
 	} catch (err) {
 		console.error("error in evaluateAlarms", err.message, err);
+		target.alarmComputationError = true;
 	}
 }
 
