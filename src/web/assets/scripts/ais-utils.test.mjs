@@ -686,5 +686,38 @@ describe("ais-utils", () => {
 			expect(invalidTarget.range).toBeNull();
 			expect(invalidTarget.bearing).toBeNull();
 		});
+
+		it("should mark targets with missing timestamps as invalid", () => {
+			const targets = new Map();
+			const selfTarget = createTarget({ mmsi: "000000001" });
+			const invalidTarget = createTarget({
+				mmsi: "123456789",
+				lastSeenDate: undefined,
+			});
+
+			targets.set("000000001", selfTarget);
+			targets.set("123456789", invalidTarget);
+
+			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+
+			expect(Number.isFinite(invalidTarget.lastSeen)).toBe(true);
+			expect(invalidTarget.lastSeen).toBeGreaterThan(TARGET_MAX_AGE);
+			expect(invalidTarget.isValid).toBe(false);
+		});
+
+		it("should store new targets even when a delta has no updates", () => {
+			const targets = new Map();
+			const mmsi = processDelta(
+				{ context: "vessels.urn:mrn:imo:mmsi:123456789" },
+				targets,
+			);
+
+			expect(mmsi).toBe("123456789");
+			expect(targets.get("123456789")).toMatchObject({
+				mmsi: "123456789",
+				sog: 0,
+				cog: 0,
+			});
+		});
 	});
 });

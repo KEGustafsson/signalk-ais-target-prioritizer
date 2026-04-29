@@ -28,7 +28,10 @@ export function processDelta(delta, targets) {
 	target.context = delta.context;
 
 	const updates = delta.updates;
-	if (!updates) return mmsi;
+	if (!updates) {
+		targets.set(mmsi, target);
+		return mmsi;
+	}
 
 	for (const update of updates) {
 		const values = update.values;
@@ -214,6 +217,9 @@ export function updateSingleTargetDerivedData(
 	}
 
 	let lastSeen = Math.round((Date.now() - target.lastSeenDate) / 1000);
+	if (!Number.isFinite(lastSeen)) {
+		lastSeen = TARGET_MAX_AGE + 1;
+	}
 	if (lastSeen < 0) {
 		lastSeen = 0;
 	}

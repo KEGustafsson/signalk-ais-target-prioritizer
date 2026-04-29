@@ -10,6 +10,8 @@ import {
 	WS_RECONNECT_MAX_DELAY,
 	STORAGE_KEYS,
 } from "../../../shared/constants.mjs";
+import { isValidCollisionProfiles } from "../../../shared/collision-profiles.mjs";
+import { buildAisTargetSubscription } from "../../../shared/signalk-subscription.mjs";
 
 const AGE_OUT_OLD_TARGETS = true;
 const USE_WEBSOCKET_STREAMING = true; // Use WebSocket streaming instead of polling
@@ -532,6 +534,11 @@ const SAVE_DEBOUNCE_MS = 500;
  * Multiple rapid calls will be coalesced into a single save.
  */
 function saveCollisionProfiles() {
+	if (!isValidCollisionProfiles(collisionProfiles)) {
+		showError("Collision profile settings are invalid and were not saved.");
+		return;
+	}
+
 	// Clear any existing timer
 	if (saveCollisionProfilesTimer) {
 		clearTimeout(saveCollisionProfilesTimer);
@@ -842,24 +849,7 @@ function connectToSignalKStream() {
 		updateConnectionStatus("connected");
 
 		// Subscribe to vessel and aton data
-		const subscription = {
-			context: "*",
-			subscribe: [
-				{ path: "", period: 1000 },
-				{ path: "navigation.position", period: 1000 },
-				{ path: "navigation.courseOverGroundTrue", period: 1000 },
-				{ path: "navigation.speedOverGround", period: 1000 },
-				{ path: "navigation.headingTrue", period: 1000 },
-				{ path: "navigation.rateOfTurn", period: 1000 },
-				{ path: "navigation.state", period: 1000 },
-				{ path: "navigation.destination.commonName", period: 1000 },
-				{ path: "design.*", period: 1000 },
-				{ path: "sensors.ais.class", period: 1000 },
-				{ path: "atonType", period: 1000 },
-				{ path: "offPosition", period: 1000 },
-				{ path: "virtual", period: 1000 },
-			],
-		};
+		const subscription = buildAisTargetSubscription(1000);
 		signalkWebSocket.send(JSON.stringify(subscription));
 	};
 

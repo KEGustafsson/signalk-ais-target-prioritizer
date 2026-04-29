@@ -12,7 +12,6 @@ export default {
 		"node:path",
 		"express",
 		"express-sse",
-		"lodash",
 		"node-tcp-proxy",
 	],
 };

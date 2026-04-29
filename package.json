@@ -1,6 +1,6 @@
 {
 	"name": "signalk-ais-target-prioritizer",
-	"version": "0.5.3",
+	"version": "0.6.0",
 	"description": "A SignalK plugin that priorizes AIS targets according to guard and CPA criteria.",
 	"keywords": [
 		"signalk-node-server-plugin",
@@ -39,7 +39,6 @@
 		"labelgun": "^6.1.0",
 		"leaflet": "^1.9.4",
 		"leaflet-easybutton": "^2.4.0",
-		"lodash": "^4.17.21",
 		"node-tcp-proxy": "^0.0.21",
 		"nosleep.js": "^0.12.0",
 		"protomaps-leaflet": "^5.1.0"

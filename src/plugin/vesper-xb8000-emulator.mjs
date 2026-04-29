@@ -15,17 +15,23 @@ import express from "express";
 const expressApp = express();
 
 import SSE from "express-sse";
-import _ from "lodash";
 
 var sse = new SSE();
 
 import proxy from "node-tcp-proxy";
 
 import { METERS_PER_NM, KNOTS_PER_M_PER_S } from "../shared/constants.mjs";
+import {
+	cloneCollisionProfiles,
+	isValidCollisionProfiles,
+} from "../shared/collision-profiles.mjs";
 
 const httpPort = 39151;
+const httpHost =
+	process.env.SIGNALK_AIS_TARGET_PRIORITIZER_EMULATOR_HOST || "127.0.0.1";
 
-const enableNmeaOverTcpServer = true; // ios app will not connect without this
+const enableNmeaOverTcpServer =
+	process.env.SIGNALK_AIS_TARGET_PRIORITIZER_ENABLE_NMEA_PROXY === "true";
 const nmeaOverTcpServerPort = 39150; // apps look for nmea traffic on 39150. this is not confurable in the apps. so we proxy signalk 10110 to 39150.
 const proxySourceHostname = "127.0.0.1"; // signalk server address (localhost - same place this plugin is running)
 const proxySourcePort = 10110; // signalk nmea over tcp port
@@ -830,7 +836,13 @@ function setupHttpServer() {
 	// GET /prefs/setPreferences?profile.current=OFFSHORE
 	expressApp.get("/prefs/setPreferences", (req, res) => {
 		if (req.query["profile.current"]) {
-			collisionProfiles.current = req.query["profile.current"].toLowerCase();
+			const nextCollisionProfiles = cloneCollisionProfiles(collisionProfiles);
+			nextCollisionProfiles.current = req.query["profile.current"].toLowerCase();
+			if (!isValidCollisionProfiles(nextCollisionProfiles)) {
+				res.status(400).json({ error: "Invalid collision profile" });
+				return;
+			}
+			Object.assign(collisionProfiles, nextCollisionProfiles);
 			saveCollisionProfiles();
 			sendXmlResponse(res, getPreferencesXml());
 		} else {
@@ -932,14 +944,18 @@ function setupHttpServer() {
 		//      'content-type': 'application/json'
 		expressApp.put("/v3/watchMate/collisionProfiles", (req, res) => {
 			app.debug("PUT /v3/watchMate/collisionProfiles", req.body);
-			//app.debug("before merge", collisionProfiles);
-			mergePutData(req, collisionProfiles);
-			//app.debug("after merge", collisionProfiles);
+			const nextCollisionProfiles = cloneCollisionProfiles(collisionProfiles);
+			mergePutData(req, nextCollisionProfiles);
 			// remove "threat" paths that watchmate adds:
-			delete collisionProfiles.anchor.threat;
-			delete collisionProfiles.harbor.threat;
-			delete collisionProfiles.coastal.threat;
-			delete collisionProfiles.offshore.threat;
+			delete nextCollisionProfiles.anchor.threat;
+			delete nextCollisionProfiles.harbor.threat;
+			delete nextCollisionProfiles.coastal.threat;
+			delete nextCollisionProfiles.offshore.threat;
+			if (!isValidCollisionProfiles(nextCollisionProfiles)) {
+				res.status(400).json({ error: "Invalid collision profiles" });
+				return;
+			}
+			Object.assign(collisionProfiles, cloneCollisionProfiles(nextCollisionProfiles));
 			saveCollisionProfiles();
 			res.json();
 		});
@@ -1002,8 +1018,8 @@ function setupHttpServer() {
 		res.status(404).end();
 	});
 
-	httpServer = expressApp.listen(httpPort, () =>
-		app.debug(`HTTP server listening on port ${httpPort}`),
+	httpServer = expressApp.listen(httpPort, httpHost, () =>
+		app.debug(`HTTP server listening on ${httpHost}:${httpPort}`),
 	);
 }
 // ======================= END HTTP SERVER ========================
@@ -1016,6 +1032,9 @@ function setupHttpServer() {
 // what it perceives as lost connectivity with the Vesper AIS unit.
 function setupTcpProxyServer() {
 	if (enableNmeaOverTcpServer) {
+		app.debug(
+			`Starting unauthenticated NMEA TCP proxy on port ${nmeaOverTcpServerPort}`,
+		);
 		tcpProxyServer = proxy.createProxy(
 			nmeaOverTcpServerPort,
 			proxySourceHostname,
@@ -1037,13 +1056,42 @@ function mergePutData(req, originalObject) {
 	//app.debug('contentType', contentType);
 	//app.debug('req.body', req.body);
 
-	if (contentType && contentType === "application/json") {
+	if (contentType?.startsWith("application/json")) {
 		update = req.body;
 	} else {
 		update = JSON.parse(Object.keys(req.body)[0]);
 	}
 
-	_.merge(originalObject, update);
+	safeDeepMerge(originalObject, update);
+}
+
+function isPlainObject(value) {
+	return (
+		value != null &&
+		typeof value === "object" &&
+		(Object.getPrototypeOf(value) === Object.prototype ||
+			Object.getPrototypeOf(value) === null)
+	);
+}
+
+function safeDeepMerge(target, source) {
+	if (!isPlainObject(source)) return target;
+
+	for (const [key, value] of Object.entries(source)) {
+		if (key === "__proto__" || key === "constructor" || key === "prototype") {
+			continue;
+		}
+
+		if (isPlainObject(value) && isPlainObject(target[key])) {
+			safeDeepMerge(target[key], value);
+		} else if (isPlainObject(value)) {
+			target[key] = safeDeepMerge({}, value);
+		} else {
+			target[key] = value;
+		}
+	}
+
+	return target;
 }
 
 function setAnchored() {

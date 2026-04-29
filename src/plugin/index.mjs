@@ -9,34 +9,23 @@ import {
 	updateSingleTargetDerivedData,
 } from "../web/assets/scripts/ais-utils.mjs";
 import {
+	cloneCollisionProfiles,
+	isValidCollisionProfiles,
+} from "../shared/collision-profiles.mjs";
+import {
 	TARGET_MAX_AGE,
 	PUBLISH_THRESHOLDS,
 	GPS_STALE_WARNING_SECONDS,
 } from "../shared/constants.mjs";
+import { buildAisTargetSubscription } from "../shared/signalk-subscription.mjs";
 import schema from "./schema.json" with { type: "json" };
 import * as vesper from "./vesper-xb8000-emulator.mjs";
 
 const AGE_OUT_OLD_TARGETS = true;
+const STATUS_CHECK_INTERVAL_MS = 1000;
 
 /** Regular expression for validating MMSI format (9 digits) */
 const MMSI_REGEX = /^[0-9]{9}$/;
-
-const VALID_PROFILE_NAMES = ["anchor", "harbor", "coastal", "offshore"];
-
-function isValidProfileShape(p) {
-	const isNonNegativeNumber = (v) => typeof v === "number" && isFinite(v) && v >= 0;
-	return (
-		p != null &&
-		isNonNegativeNumber(p.warning?.cpa) &&
-		isNonNegativeNumber(p.warning?.tcpa) &&
-		isNonNegativeNumber(p.warning?.speed) &&
-		isNonNegativeNumber(p.danger?.cpa) &&
-		isNonNegativeNumber(p.danger?.tcpa) &&
-		isNonNegativeNumber(p.danger?.speed) &&
-		isNonNegativeNumber(p.guard?.range) &&
-		isNonNegativeNumber(p.guard?.speed)
-	);
-}
 
 let selfMmsi;
 let selfName;
@@ -55,6 +44,7 @@ let options;
 export default function (app) {
 	const plugin = {};
 	let unsubscribes = [];
+	let statusCheckInterval;
 
 	plugin.id = "signalk-ais-target-prioritizer";
 	plugin.name = "SignalK AIS Target Prioritizer";
@@ -97,6 +87,10 @@ export default function (app) {
 		app.debug(`Stopping plugin ${plugin.id}`);
 		unsubscribes.forEach((f) => f());
 		unsubscribes = [];
+		if (statusCheckInterval) {
+			clearInterval(statusCheckInterval);
+			statusCheckInterval = null;
+		}
 		if (options?.enableAlarmPublishing && lastPublishedNotification.state !== "normal") {
 			sendNotification("normal", CLEAR_NOTIFICATION_MESSAGE);
 		}
@@ -120,14 +114,7 @@ export default function (app) {
 			const newCollisionProfiles = req.body;
 			app.debug("setCollisionProfiles", newCollisionProfiles);
 			// do some basic validation to ensure we have some real config data before saving it
-			if (
-				!newCollisionProfiles ||
-				!VALID_PROFILE_NAMES.includes(newCollisionProfiles.current) ||
-				!isValidProfileShape(newCollisionProfiles.anchor) ||
-				!isValidProfileShape(newCollisionProfiles.harbor) ||
-				!isValidProfileShape(newCollisionProfiles.coastal) ||
-				!isValidProfileShape(newCollisionProfiles.offshore)
-			) {
+			if (!isValidCollisionProfiles(newCollisionProfiles)) {
 				app.error(
 					"ERROR - not saving invalid new collision profiles",
 					newCollisionProfiles,
@@ -136,8 +123,9 @@ export default function (app) {
 				return;
 			}
 			// must use Object.assign rather than "collisionProfiles = newCollisionProfiles" to prevent breaking the reference we passed into the vesper emulator
-			Object.assign(collisionProfiles, newCollisionProfiles);
+			Object.assign(collisionProfiles, cloneCollisionProfiles(newCollisionProfiles));
 			saveCollisionProfiles();
+			recalculateAllTargets();
 			res.json(collisionProfiles);
 		});
 
@@ -207,15 +195,25 @@ export default function (app) {
 			);
 			if (fs.existsSync(collisionProfilesPath)) {
 				app.debug("Reading file", collisionProfilesPath);
-				collisionProfiles = JSON.parse(
+				const savedCollisionProfiles = JSON.parse(
 					fs.readFileSync(collisionProfilesPath).toString(),
 				);
+				if (isValidCollisionProfiles(savedCollisionProfiles)) {
+					collisionProfiles = cloneCollisionProfiles(savedCollisionProfiles);
+				} else {
+					app.error(
+						"Invalid collisionProfiles.json, replacing with defaults",
+						collisionProfilesPath,
+					);
+					collisionProfiles = cloneCollisionProfiles(defaultCollisionProfiles);
+					saveCollisionProfiles();
+				}
 			} else {
 				app.debug(
 					"collisionProfiles.json not found, using defaultCollisionProfiles",
 					collisionProfilesPath,
 				);
-				collisionProfiles = defaultCollisionProfiles;
+				collisionProfiles = cloneCollisionProfiles(defaultCollisionProfiles);
 				saveCollisionProfiles();
 			}
 		} catch (err) {
@@ -268,70 +266,7 @@ export default function (app) {
 		// atons.*
 		// vessels.*
 		// vessels.self
-		const localSubscription = {
-			context: "*", // we need both vessels and atons
-			subscribe: [
-				{
-					// "name" is in the root path
-					// and "communication.callsignVhf"
-					// and imo
-					path: "",
-					period: 1000,
-				},
-				{
-					path: "navigation.position",
-					period: 1000,
-				},
-				{
-					path: "navigation.courseOverGroundTrue",
-					period: 1000,
-				},
-				{
-					path: "navigation.speedOverGround",
-					period: 1000,
-				},
-				{
-					path: "navigation.magneticVariation",
-					period: 1000,
-				},
-				{
-					path: "navigation.headingTrue",
-					period: 1000,
-				},
-				{
-					path: "navigation.state",
-					period: 1000,
-				},
-				{
-					path: "navigation.destination.commonName",
-					period: 1000,
-				},
-				{
-					path: "navigation.rateOfTurn",
-					period: 1000,
-				},
-				{
-					path: "design.*",
-					period: 1000,
-				},
-				{
-					path: "sensors.ais.class",
-					period: 1000,
-				},
-				{
-					path: "atonType",
-					period: 1000,
-				},
-				{
-					path: "offPosition",
-					period: 1000,
-				},
-				{
-					path: "virtual",
-					period: 1000,
-				},
-			],
-		};
+		const localSubscription = buildAisTargetSubscription(1000);
 
 		app.subscriptionmanager.subscribe(
 			localSubscription,
@@ -421,6 +356,56 @@ export default function (app) {
 				app.setPluginStatus(`Watching ${targets.size - 1} targets`);
 			},
 		);
+
+		if (!statusCheckInterval) {
+			statusCheckInterval = setInterval(checkPluginStatus, STATUS_CHECK_INTERVAL_MS);
+		}
+	}
+
+	function recalculateAllTargets() {
+		selfTarget = targets.get(selfMmsi);
+		if (!selfTarget) {
+			return false;
+		}
+
+		try {
+			updateDerivedData(targets, selfTarget, collisionProfiles, TARGET_MAX_AGE);
+			targets.forEach((target) => {
+				target.needsRecalc = false;
+			});
+			return true;
+		} catch (error) {
+			app.debug(error);
+			app.setPluginError(error.message);
+			return false;
+		}
+	}
+
+	function checkPluginStatus() {
+		selfTarget = targets.get(selfMmsi);
+		if (!selfTarget) {
+			return;
+		}
+
+		try {
+			updateSingleTargetDerivedData(
+				selfTarget,
+				selfTarget,
+				collisionProfiles,
+				TARGET_MAX_AGE,
+			);
+		} catch (error) {
+			app.debug(error);
+			app.setPluginError(error.message);
+			return;
+		}
+
+		if (selfTarget.lastSeen > GPS_STALE_WARNING_SECONDS) {
+			const message = `No GPS position received for more than ${GPS_STALE_WARNING_SECONDS} seconds`;
+			app.debug(message);
+			app.setPluginError(message);
+		}
+		syncAlarmNotificationState();
 	}
 
 	/**
