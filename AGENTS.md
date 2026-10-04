@@ -31,7 +31,8 @@ There are two tsconfigs for the same reason — `tsconfig.app.json` and
 
 ```bash
 npm run dev        # vite on :5173, proxies /signalk /plugins /skServer to :3000
-npm run checks     # format:check + lint + typecheck + test + build. Also runs as preversion.
+npm run checks     # format:check + lint + typecheck + build + test. Also runs as preversion.
+                   # build comes first: test/plugin.test.mjs loads the built plugin/index.cjs.
 npm test           # vitest run
 npm run coverage   # istanbul provider (not v8 - see below)
 npm run build      # build:web (+ verify:build) then build:plugin

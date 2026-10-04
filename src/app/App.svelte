@@ -22,7 +22,7 @@
   } from "../engine/ingestion.svelte";
   import { resolveIsDark, ui } from "./ui.svelte";
   import { checkFontsAvailable, mapState } from "./map.svelte";
-  import { checkConnectivity, connectivity } from "./connectivity.svelte";
+  import { checkConnectivity } from "./connectivity.svelte";
   import { CircleCheck, CircleX, Info, TriangleAlert } from "@lucide/svelte";
   import { basemaps, DEFAULT_BASEMAP, initBasemaps } from "./basemaps.svelte";
   import type { CollisionProfiles, InitStep } from "../types";
@@ -51,13 +51,6 @@
       ? vessels[vesselsState.myVesselContext]
       : undefined,
   );
-
-  $inspect({ basemapId: mapState.basemapId });
-  $inspect({ openSeaMap: mapState.openSeaMap });
-  $inspect({ styleId: mapState.styleId });
-  $inspect({ darkMode: ui.darkMode });
-  $inspect({ documentVisibilityState: ui.documentVisibilityState });
-  $inspect({ online: connectivity.online });
 
   // let initSteps = $state<InitStep[]>([
   const initSteps = $state<Record<string, InitStep>>({

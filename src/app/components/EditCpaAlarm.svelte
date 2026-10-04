@@ -10,8 +10,6 @@
   } from "../utils/sliderValueConverter";
 
   let { alarmState }: { alarmState: "warning" | "danger" } = $props();
-
-  $inspect("ENTER EditProfile", alarmState);
 </script>
 
 <!-- CPA Less Than -->

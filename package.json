@@ -70,7 +70,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
-    "checks": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build",
+    "checks": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test",
     "preversion": "npm run checks",
     "changelog": "node scripts/generate-changelog.mjs",
     "version": "npm run changelog"
