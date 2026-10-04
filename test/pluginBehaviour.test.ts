@@ -28,10 +28,14 @@ const knots = (kn: number) => kn / KNOTS_PER_M_PER_S;
 const nmNorth = (nm: number) => nm / 60;
 const TICK = 3_000; // default updateIntervalDelay, in ms
 
-type Handler = (
-  req: { body?: unknown; params?: Record<string, string> },
-  res: FakeRes,
-) => void;
+interface FakeReq {
+  method: string;
+  body?: unknown;
+  params?: Record<string, string>;
+  is: (type: string) => boolean;
+}
+
+type Handler = (req: FakeReq, res: FakeRes, next?: () => void) => void;
 
 interface FakeRes {
   statusCode: number;
@@ -97,8 +101,11 @@ function createApp() {
   } as unknown as ServerAPI;
 }
 
+let middleware: Handler[];
+
 function registerRoutes() {
   routes = {};
+  middleware = [];
   const add =
     (method: string) =>
     (route: string, handler: Handler): void => {
@@ -108,14 +115,32 @@ function registerRoutes() {
     get: add("GET"),
     put: add("PUT"),
     post: add("POST"),
+    use: (handler: Handler) => middleware.push(handler),
   } as never);
 }
 
-function call(route: string, body?: unknown) {
+// run a request through the router's middleware and then the route, as express does
+function call(
+  route: string,
+  body?: unknown,
+  contentType: string | null = "application/json",
+) {
   const res = fakeRes();
   const handler = routes[route];
   if (!handler) throw new Error(`no route ${route}`);
-  handler({ body, params: {} }, res);
+  const method = route.split(" ")[0];
+  const req: FakeReq = {
+    method,
+    body,
+    params: {},
+    is: (type) => contentType === type,
+  };
+  for (const mw of middleware) {
+    let passed = false;
+    mw(req, res, () => (passed = true));
+    if (!passed) return res;
+  }
+  handler(req, res);
   return res;
 }
 
@@ -157,8 +182,14 @@ const closestApproachFor = (context: string) =>
 // a plain copy of the reactive store
 const snapshot = () => JSON.parse(JSON.stringify(collisionProfiles));
 
+// start the plugin, then let one tick run. start() clears the vessel list, so the
+// vessels a test seeded are put back first - as if their deltas had just arrived -
+// keeping the same objects, so a test can go on changing them
 function start(options: Record<string, unknown> = {}) {
+  const seeded = Object.values(vessels);
   plugin.start(options, () => {});
+  for (const vessel of seeded) vessels[vessel.context] = vessel;
+  vi.advanceTimersByTime(TICK);
 }
 
 beforeEach(() => {
@@ -446,5 +477,156 @@ describe("loading collision profiles", () => {
     expect(fs.existsSync(path.join(dataDir, "collisionProfiles.json"))).toBe(
       true,
     );
+  });
+});
+
+describe("restarting", () => {
+  it("does not raise alarms from the previous run on the first tick", () => {
+    put(SELF);
+    putCollisionCourse("111111111");
+    start();
+    plugin.stop();
+    messages = [];
+
+    // the old vessels are stale by now - own ship well past the lost-gps limit
+    vessels[SELF].lastSeenDate = new Date(
+      Date.now() - (NO_GPS_FIX_WARNING + 30) * 1000,
+    );
+    plugin.start({}, () => {});
+
+    expect(Object.keys(vessels)).toHaveLength(0);
+    expect(
+      messages.filter(
+        (m) => (m.value as { state?: string } | null)?.state === "alarm",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("forgets mutes from the previous run", () => {
+    put(SELF);
+    put(ctx("111111111"), { alarmIsMuted: true });
+    plugin.start({}, () => {});
+    expect(vessels[ctx("111111111")]).toBeUndefined();
+  });
+
+  it("falls back to the default interval for a nonsense one", () => {
+    put(SELF);
+    put(ctx("333333333"), { latitude: nmNorth(5) });
+    start({ updateIntervalDelay: 0 });
+    const before = messages.length;
+    // with an interval of 0 the loop would spin; it must still be 3 s apart
+    vi.advanceTimersByTime(TICK - 1);
+    expect(messages.length).toBe(before);
+  });
+});
+
+describe("alarm deduplication", () => {
+  it("does not re-sound an alarm when only the vessel's name arrives", () => {
+    put(SELF);
+    const target = putCollisionCourse("111111111");
+    start();
+    target.name = "MV EXAMPLE";
+    vi.advanceTimersByTime(TICK * 2);
+
+    expect(notificationsFor(ctx("111111111"))).toHaveLength(1);
+  });
+
+  it("does not re-check signal k every tick for a target that never alarmed", () => {
+    const getPath = vi.fn(() => undefined);
+    plugin.stop();
+    plugin = createPlugin({ ...createApp(), getPath } as unknown as ServerAPI);
+    put(SELF);
+    put(ctx("222222222"), { latitude: nmNorth(20) });
+    start();
+    vi.advanceTimersByTime(TICK * 3);
+
+    expect(getPath).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("withdrawing published data", () => {
+  it("withdraws a target's data once it is out of range", () => {
+    put(SELF);
+    const target = put(ctx("333333333"), { latitude: nmNorth(5) });
+    start({ maximumTargetRange: 10 });
+    target.latitude = nmNorth(20);
+    vi.advanceTimersByTime(TICK);
+
+    expect(closestApproachFor(ctx("333333333")).at(-1)?.value).toBeNull();
+  });
+
+  it("withdraws every target's data when the plugin stops", () => {
+    put(SELF);
+    put(ctx("333333333"), { latitude: nmNorth(5) });
+    start();
+    plugin.stop();
+
+    expect(closestApproachFor(ctx("333333333")).at(-1)?.value).toBeNull();
+  });
+
+  it("withdraws the data of a target that ages out", () => {
+    put(SELF);
+    const target = put(ctx("333333333"), { latitude: nmNorth(5) });
+    start();
+    target.lastSeenDate = new Date(Date.now() - (TARGET_MAX_AGE + 60) * 1000);
+    vi.advanceTimersByTime(TICK);
+
+    expect(closestApproachFor(ctx("333333333")).at(-1)?.value).toBeNull();
+  });
+});
+
+describe("cross-site request guard", () => {
+  it("refuses a state change without a json body", () => {
+    put(SELF);
+    put(ctx("111111111"), { alarmState: "danger" });
+    expect(call("POST /muteAllAlarms", undefined, null).statusCode).toBe(415);
+    expect(
+      call("POST /muteAllAlarms", "x", "application/x-www-form-urlencoded")
+        .statusCode,
+    ).toBe(415);
+  });
+
+  it("accepts a json state change", () => {
+    expect(call("POST /muteAllAlarms", {}).statusCode).toBe(200);
+  });
+
+  it("leaves reads alone", () => {
+    expect(call("GET /getVessels", undefined, null).statusCode).toBe(200);
+  });
+
+  it("no longer offers the unused font upload", () => {
+    expect(routes["POST /upload-fonts"]).toBeUndefined();
+  });
+});
+
+describe("saving collision profiles", () => {
+  it("leaves no temp file behind", () => {
+    call("PUT /saveCollisionProfiles", { ...snapshot(), current: "harbor" });
+    expect(fs.readdirSync(dataDir)).toEqual(["collisionProfiles.json"]);
+  });
+
+  it("keeps the running profiles when the write fails", () => {
+    // a directory where the file should be makes the rename fail
+    fs.mkdirSync(path.join(dataDir, "collisionProfiles.json"));
+    const res = call("PUT /saveCollisionProfiles", {
+      ...snapshot(),
+      current: "harbor",
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(collisionProfiles.current).toBe("offshore");
+  });
+
+  it("still starts when the defaults cannot be written", () => {
+    const dirtyApp = {
+      ...createApp(),
+      getDataDirPath: () => path.join(dataDir, "file", "nested"),
+    } as unknown as ServerAPI;
+    // a file where the data dir's parent should be makes mkdir fail
+    fs.writeFileSync(path.join(dataDir, "file"), "");
+    plugin.stop();
+    plugin = createPlugin(dirtyApp);
+
+    expect(() => plugin.start({}, () => {})).not.toThrow();
   });
 });

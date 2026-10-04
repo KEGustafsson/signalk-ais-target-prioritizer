@@ -1,14 +1,21 @@
-import {
-  type Plugin,
-  type ServerAPI,
-  type Context,
-  type Path,
-  type Unsubscribes,
+// a top-level "import type" is erased completely. inline `type` specifiers are not
+// under verbatimModuleSyntax: they left a bare require("@signalk/server-api") in the
+// bundle, and that package is only a devDependency, so not there on a real install.
+import type {
+  Plugin,
+  ServerAPI,
+  Context,
+  Path,
+  Unsubscribes,
 } from "@signalk/server-api";
 import fs from "node:fs";
 import path from "node:path";
 import * as npmPackage from "../../package.json";
-import { queueVesselUpdates, subscription } from "../engine/ingestion.svelte";
+import {
+  clearPendingUpdates,
+  queueVesselUpdates,
+  subscription,
+} from "../engine/ingestion.svelte";
 import { updateVessels } from "../engine/refreshLoop.svelte";
 import {
   deleteAllVessels,
@@ -30,11 +37,15 @@ import {
   NO_GPS_FIX_WARNING,
   PUBLISH_MAX_INTERVAL,
 } from "../engine/constants";
-import { calcIsValid } from "../engine/calculations";
+import { calcIsValid, isValidNumber } from "../engine/calculations";
+import {
+  cloneCollisionProfiles,
+  isValidCollisionProfiles,
+} from "../engine/validateCollisionProfiles";
 import { hasTargetDataChanged, type PublishedTargetData } from "./publishing";
 import { registerAssetEndpoints } from "./font-downloader";
 import { schema } from "./schema";
-import type { Vessel } from "../types";
+import type { CollisionProfiles, Vessel } from "../types";
 
 const myVessel = $derived(
   vesselsState.myVesselContext ? vessels[vesselsState.myVesselContext] : null,
@@ -92,8 +103,13 @@ export default function (app: ServerAPI) {
     _restart: (newConfiguration: object) => void,
   ) {
     app.debug(`*** Starting plugin ${plugin.id}`, { options });
+    // a 0, negative or non-numeric interval (hand edited config) would make the loop
+    // fire back to back and peg the cpu
     updateIntervalDelay =
-      options.updateIntervalDelay ?? DEFAULT_UPDATE_INTERVAL_DELAY;
+      isValidNumber(options.updateIntervalDelay) &&
+      options.updateIntervalDelay >= 1
+        ? options.updateIntervalDelay
+        : DEFAULT_UPDATE_INTERVAL_DELAY;
     maximumTargetRange =
       options.maximumTargetRange ?? DEFAULT_MAXIMUM_TARGET_RANGE;
     enableDataPublishing =
@@ -111,11 +127,14 @@ export default function (app: ServerAPI) {
 
     vesselsState.myVesselContext = selfContext;
 
+    // vessels and the update queue are module state, so they outlive a stop. starting
+    // over from them made the first tick - which runs before any new delta - raise
+    // alarms from the previous run, a lost-gps alarm included, and kept old mutes
+    deleteAllVessels();
+    clearPendingUpdates();
+
     if (enableDataPublishing || enableAlarmPublishing) {
       enablePluginCpaCalculations();
-    } else {
-      // if plugin was stopped and started again with options set to not perform calculations, then clear out old targets
-      deleteAllVessels();
     }
   }
 
@@ -124,13 +143,26 @@ export default function (app: ServerAPI) {
     unsubscribes.forEach((f) => f());
     unsubscribes = [];
     stopUpdating();
-    // nothing will be watching once we stop, so leave no alarm standing
+    // nothing will be watching once we stop, so leave no alarm standing and no
+    // derived data that would go on looking current
     clearAllNotifications();
-    lastPublished.clear();
+    for (const context of lastPublished.keys()) withdrawTargetData(context);
     app.debug(`Stopped plugin ${plugin.id}`);
   }
 
   plugin.registerWithRouter = (router) => {
+    // every state-changing route takes a json body. a cross-site <form> or no-cors
+    // fetch cannot send application/json without a cors preflight, so this stops a
+    // page the crew happens to have open from silently muting the collision alarms
+    // (common when signal k security is off, as it often is on board)
+    router.use((req, res, next) => {
+      if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+      if (req.is("application/json")) return next();
+      res
+        .status(415)
+        .json({ error: "state-changing requests need a json body" });
+    });
+
     router.get("/loadCollisionProfiles", (_req, res) => {
       app.debug("loadCollisionProfiles", collisionProfiles);
       res.json(collisionProfiles);
@@ -139,20 +171,21 @@ export default function (app: ServerAPI) {
     router.put("/saveCollisionProfiles", (req, res) => {
       const newCollisionProfiles = req.body;
       app.debug("saveCollisionProfiles", newCollisionProfiles);
-      try {
-        setCollisionProfiles(newCollisionProfiles);
-      } catch {
+      if (!isValidCollisionProfiles(newCollisionProfiles)) {
         app.error("ERROR - not saving invalid new collision profiles");
         res.status(400).json({ error: "invalid collision profiles" });
         return;
       }
+      // write first, and only then apply - so a failed write cannot leave settings
+      // running that will be gone after the next restart
       try {
-        saveCollisionProfiles();
+        saveCollisionProfiles(cloneCollisionProfiles(newCollisionProfiles));
       } catch (err) {
         app.error(`ERROR - could not save collision profiles: ${err}`);
         res.status(500).json({ error: "could not save collision profiles" });
         return;
       }
+      setCollisionProfiles(newCollisionProfiles);
       res.json(collisionProfiles);
     });
 
@@ -225,7 +258,13 @@ export default function (app: ServerAPI) {
         collisionProfilesPath,
       );
       resetCollisionProfiles();
-      saveCollisionProfiles();
+      // a read-only or full card must not keep the plugin from starting either -
+      // run on the defaults, and try writing them again on the next save
+      try {
+        saveCollisionProfiles(collisionProfiles);
+      } catch (err) {
+        app.error(`could not write the default collision profiles: ${err}`);
+      }
       return;
     }
 
@@ -247,8 +286,8 @@ export default function (app: ServerAPI) {
   }
 
   // save configuration data to signal k server plugin configuration folder
-  function saveCollisionProfiles() {
-    app.debug("saving ", collisionProfiles);
+  function saveCollisionProfiles(data: CollisionProfiles) {
+    app.debug("saving ", data);
 
     const dataDirPath = app.getDataDirPath();
 
@@ -266,11 +305,13 @@ export default function (app: ServerAPI) {
       "collisionProfiles.json",
     );
     app.debug("Writing file", collisionProfilesPath);
+    // write a temp file and rename it over the old one: a rename is atomic, so a
+    // power cut mid-save leaves either the old settings or the new, never a
+    // truncated file that silently falls back to the defaults on the next start
+    const tempPath = `${collisionProfilesPath}.tmp`;
     try {
-      fs.writeFileSync(
-        collisionProfilesPath,
-        JSON.stringify(collisionProfiles, null, 2),
-      );
+      fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+      fs.renameSync(tempPath, collisionProfilesPath);
     } catch (err) {
       app.error("Error writing collisionProfiles.json");
       throw new Error("Error writing collisionProfiles.json:", { cause: err });
@@ -354,8 +395,10 @@ export default function (app: ServerAPI) {
 
         if (enableDataPublishing) {
           if (ignore) {
-            // forget it, so it is published afresh if it comes back into range
-            lastPublished.delete(vessel.context);
+            // withdraw what we last published - signal k would otherwise go on
+            // showing it, alarm state and all, as current - and publish afresh if
+            // it comes back into range
+            withdrawTargetData(vessel.context);
           } else {
             publishTargetData(vessel);
           }
@@ -370,10 +413,16 @@ export default function (app: ServerAPI) {
               `${vessel.alarmState === "danger" ? "alarm" : vessel.alarmState}`
             ).toUpperCase();
 
+            const state =
+              vessel.alarmState === "warning" ? STATUS_WARN : STATUS_ALARM;
+            // deduplicate on what the alarm is, not on its wording: the name only
+            // arrives with the static data, and re-sending the alarm just because
+            // "<mmsi>" turned into a name would sound it again
             setNotification(
               vessel.context,
-              vessel.alarmState === "warning" ? STATUS_WARN : STATUS_ALARM,
+              state,
               message,
+              `${state}|${vessel.alarmType}`,
             );
           } else {
             setNotification(vessel.context, STATUS_NORMAL, "Watching");
@@ -390,15 +439,30 @@ export default function (app: ServerAPI) {
         }
       }
       for (const context of lastPublished.keys()) {
-        if (!(context in vessels)) lastPublished.delete(context);
+        if (!(context in vessels)) withdrawTargetData(context);
       }
 
       app.setPluginStatus(
         `Watching ${Object.keys(vessels).length - 1} targets`,
       );
     } catch (err) {
-      app.debug("error in refreshDataModel", err);
+      // an error here skips every vessel after the one that threw, on every tick -
+      // that has to be visible, not filed under debug
+      app.error(`error evaluating vessels: ${err}`);
     }
+  }
+
+  // replace a target's published navigation.closestApproach with null
+  function withdrawTargetData(context: Context) {
+    if (!lastPublished.delete(context)) return;
+    app.handleMessage(plugin.id, {
+      context,
+      updates: [
+        {
+          values: [{ path: "navigation.closestApproach" as Path, value: null }],
+        },
+      ],
+    });
   }
 
   // publish a target's derived data, but only when it has moved on enough from what
@@ -460,8 +524,8 @@ export default function (app: ServerAPI) {
     context: Context | typeof OWN_VESSEL,
     state: string,
     message: string,
+    key = `${state}|${message}`,
   ) {
-    const key = `${state}|${message}`;
     const previous = notifications.get(context);
     if (previous === key) return;
 
@@ -473,6 +537,9 @@ export default function (app: ServerAPI) {
       previous === undefined &&
       (context === OWN_VESSEL || !hasAlarmNotification(context))
     ) {
+      // remember that it is clear, so signal k is asked once per vessel rather
+      // than for every quiet vessel on every tick
+      notifications.set(context, key);
       return;
     }
 

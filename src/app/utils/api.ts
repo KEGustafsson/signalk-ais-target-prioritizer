@@ -4,22 +4,19 @@ import type { Chart, CollisionProfiles, Tracks, Vessel } from "../../types";
 import { isValidCollisionProfiles } from "../../engine/validateCollisionProfiles";
 import type { Context } from "@signalk/server-api";
 
-// retrieves configuration data from signal k server via plugin
+// retrieves configuration data from signal k server via plugin. a failed request
+// throws rather than returning nothing: the caller must be able to tell "could not
+// load" apart from "loaded, but invalid", or it overwrites the saved profiles
 export async function loadCollisionProfiles() {
   console.log("loading collision profiles");
-  try {
-    const data: CollisionProfiles = await ky(
-      `/plugins/${PLUGIN_ID}/loadCollisionProfiles`,
-      {
-        credentials: "include",
-      },
-    ).json();
-    console.log("loaded collision profiles", data);
-    return data;
-  } catch (e) {
-    console.error(e);
-    return;
-  }
+  const data: unknown = await ky(
+    `/plugins/${PLUGIN_ID}/loadCollisionProfiles`,
+    {
+      credentials: "include",
+    },
+  ).json();
+  console.log("loaded collision profiles", data);
+  return data;
 }
 
 // validates and then saves configuration data to signal k server via plugin
@@ -106,6 +103,8 @@ export async function pushMuteAllAlarms() {
   try {
     await ky.post(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
       credentials: "include",
+      // the plugin only accepts state changes with a json body (csrf guard)
+      json: {},
     });
   } catch (e) {
     console.warn("unable to push muteAllAlarms to the plugin", e);
