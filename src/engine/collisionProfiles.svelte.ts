@@ -1,6 +1,10 @@
 // src/engine/collisionProfiles.svelte.ts
 
 import type { CollisionProfiles, CollisionProfile } from "../types";
+import {
+  cloneCollisionProfiles,
+  isValidCollisionProfiles,
+} from "./validateCollisionProfiles";
 
 const defaultCollisionProfiles: CollisionProfiles = {
   current: "offshore",
@@ -77,8 +81,15 @@ export const collisionProfiles = $state<CollisionProfiles>(
   structuredClone(defaultCollisionProfiles),
 );
 
-export function setCollisionProfiles(data: CollisionProfiles) {
-  Object.assign(collisionProfiles, data);
+// throws on anything that is not a complete, in-range profile set, leaving the
+// store untouched - the plugin feeds this straight from a request body and from a
+// file on disk, and a bad value would otherwise break alarm evaluation for every
+// target.
+export function setCollisionProfiles(data: unknown) {
+  if (!isValidCollisionProfiles(data)) {
+    throw new Error("invalid collision profiles");
+  }
+  Object.assign(collisionProfiles, cloneCollisionProfiles(data));
 }
 
 export function resetCollisionProfiles() {

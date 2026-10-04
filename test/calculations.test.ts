@@ -73,6 +73,14 @@ describe("calcProjection", () => {
     expect(calcProjection(me, vessel({ latitude: null }))).toBeUndefined();
   });
 
+  it("gives up on an undefined or NaN coordinate rather than returning NaN", () => {
+    const me = vessel();
+    const undef = undefined as unknown as null;
+    expect(calcProjection(vessel({ latitude: undef }), me)).toBeUndefined();
+    expect(calcProjection(vessel({ longitude: NaN }), me)).toBeUndefined();
+    expect(calcProjection(me, vessel({ longitude: undef }))).toBeUndefined();
+  });
+
   it("puts north in +y and east in +x", () => {
     const me = vessel();
     const north = calcProjection(vessel({ latitude: 1 }), me)!;
@@ -139,6 +147,11 @@ describe("calcVelocity", () => {
     expect(calcVelocity(vessel({ sog: 5, cog: null }))).toEqual({ x: 0, y: 0 });
   });
 
+  it("treats a NaN sog or cog as stopped too", () => {
+    expect(calcVelocity(vessel({ sog: NaN, cog: 0 }))).toEqual({ x: 0, y: 0 });
+    expect(calcVelocity(vessel({ sog: 5, cog: NaN }))).toEqual({ x: 0, y: 0 });
+  });
+
   it("resolves course into components", () => {
     const north = calcVelocity(vessel({ sog: 10, cog: NORTH }));
     expect(north.x).toBeCloseTo(0, 10);
@@ -175,6 +188,16 @@ describe("calcCpa", () => {
     const velocity = calcVelocity(vessel({ sog: knots(10), cog: NORTH }));
 
     expect(calcCpa(projection, velocity, stopped)).toBeUndefined();
+  });
+
+  it("returns nothing rather than NaN when an input is not a number", () => {
+    const velocity = calcVelocity(vessel({ sog: knots(10), cog: SOUTH }));
+    expect(calcCpa({ x: NaN, y: METERS_PER_NM }, velocity, stopped)).toBe(
+      undefined,
+    );
+    expect(
+      calcCpa({ x: 0, y: METERS_PER_NM }, { x: Infinity, y: 0 }, stopped),
+    ).toBeUndefined();
   });
 
   it("returns nothing when there is no relative motion", () => {

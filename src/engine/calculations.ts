@@ -30,10 +30,10 @@ export function toDeg(radians: number): number {
 // equirectangular projection
 export function calcProjection(v: Vessel, m: Vessel): Vector2D | undefined {
   if (
-    v.latitude === null ||
-    v.longitude === null ||
-    m.latitude === null ||
-    m.longitude === null
+    !isValidNumber(v.latitude) ||
+    !isValidNumber(v.longitude) ||
+    !isValidNumber(m.latitude) ||
+    !isValidNumber(m.longitude)
   )
     return;
   const x = toRad(v.longitude - m.longitude) * Math.cos(toRad(m.latitude)) * R;
@@ -52,7 +52,7 @@ export function calcBearing(p: Vector2D): number {
 // sog in m/s, cog in radians
 export function calcVelocity(v: Vessel): Vector2D {
   // if we dont have sog or cog, assume the vessel is not moving and proceed with cpa calc
-  if (v.sog === null || v.cog === null) return { x: 0, y: 0 };
+  if (!isValidNumber(v.sog) || !isValidNumber(v.cog)) return { x: 0, y: 0 };
 
   return {
     x: v.sog * Math.sin(v.cog),
@@ -82,10 +82,14 @@ export function calcCpa(
 
   const cx = projection.x + v.x * t;
   const cy = projection.y + v.y * t;
+  const cpa = Math.sqrt(cx * cx + cy * cy);
+
+  // a NaN in any input would otherwise come out as a NaN cpa/tcpa and be published
+  if (!isValidNumber(t) || !isValidNumber(cpa)) return;
 
   return {
     tcpa: t,
-    cpa: Math.sqrt(cx * cx + cy * cy),
+    cpa,
   };
 }
 

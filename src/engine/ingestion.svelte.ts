@@ -2,6 +2,7 @@
 
 import { WebSocket } from "partysocket";
 import { createVessel, vessels, vesselsState } from "./vessels.svelte";
+import { isValidLatLng } from "./calculations";
 import type {
   Context,
   Delta,
@@ -69,13 +70,21 @@ function upsertVessel(context: Context, updates: Update[]) {
                 vessel.imo = v.registrations.imo.replace(/imo /i, "");
               }
               break;
-            case "navigation.position":
+            case "navigation.position": {
+              // a position missing a coordinate, or out of range, is not a fix -
+              // keep the last good one rather than turning it into undefined/NaN,
+              // and do not count it as the vessel having been seen
+              if (!isValidLatLng(v.latitude, v.longitude)) break;
               vessel.latitude = v.latitude;
               vessel.longitude = v.longitude;
-              vessel.lastSeenDate = update.timestamp
+              const timestamp = update.timestamp
                 ? new Date(update.timestamp as string)
                 : new Date();
+              vessel.lastSeenDate = Number.isNaN(timestamp.getTime())
+                ? new Date()
+                : timestamp;
               break;
+            }
             case "navigation.courseOverGroundTrue":
               vessel.cog = v ?? 0;
               break;
