@@ -100,7 +100,7 @@ export async function getMutedVessels() {
 }
 
 export async function pushMuteAllAlarms() {
-  await ky(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
+  await ky.post(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
     credentials: "include",
   });
 }
@@ -109,10 +109,8 @@ export async function pushAlarmIsMuted(
   context: Context,
   alarmIsMuted: boolean,
 ) {
-  await ky(
-    `/plugins/${PLUGIN_ID}/setAlarmIsMuted/${encodeURIComponent(context)}/${alarmIsMuted}`,
-    {
-      credentials: "include",
-    },
-  );
+  await ky.put(`/plugins/${PLUGIN_ID}/setAlarmIsMuted`, {
+    credentials: "include",
+    json: { context, alarmIsMuted },
+  });
 }

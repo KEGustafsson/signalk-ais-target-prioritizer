@@ -8,6 +8,17 @@ export const DEFAULT_MAXIMUM_TARGET_RANGE = 50; // NM
 export const DEFAULT_ENABLE_DATA_PUBLISHING = true;
 export const DEFAULT_ENABLE_ALARM_PUBLISHING = true;
 
+// the plugin only republishes a target's navigation.closestApproach when one of
+// these has moved by more than the threshold (or its alarm state changed) - and
+// at least every PUBLISH_MAX_INTERVAL regardless, so the values never look stale.
+export const PUBLISH_THRESHOLDS = {
+  CPA_METERS: 10,
+  TCPA_SECONDS: 5,
+  RANGE_METERS: 10,
+  BEARING_DEGREES: 1,
+};
+export const PUBLISH_MAX_INTERVAL = 30_000; // milliseconds
+
 export const AGE_OUT_OLD_TARGETS = true;
 export const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
 export const NO_GPS_FIX_WARNING = 60; // seconds

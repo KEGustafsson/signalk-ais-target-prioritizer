@@ -37,7 +37,7 @@ The SignalK AIS Target Prioritizer plugin processes SignalK AIS data and applies
   - Calculates AIS target range, bearing, CPA, time to CPA (TCPA), collision risk rating, and warning/alarm status
   - Publishes SignalK vessel deltas containing range, bearing, CPA, time to CPA (TCPA), collision risk rating, and warning/alarm status
   - Publishes SignalK notification messages for AIS CPA and gurad warnings and alarms. These can be wired up to produce audible alarms and/or push notifications using various available notification plugins or the Node-RED plugin. This facilitates "headless" alarming.
-  - Notifications can be muted using the webapp or REST API (`GET /plugins/signalk-ais-target-prioritizer/muteAllAlarms`)
+  - Notifications can be muted using the webapp or REST API (`POST /plugins/signalk-ais-target-prioritizer/muteAllAlarms`)
 
 **The Plugin must be running in order to use the webapp.**
 
