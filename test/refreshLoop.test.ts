@@ -302,6 +302,27 @@ describe("updateVessels", () => {
       expect(vessels[ctx("1")]).toBeUndefined();
     });
 
+    it("ages out a target that never sent a position, by its last delta", () => {
+      setupOwnVessel();
+      put(ctx("1"), {
+        latitude: null,
+        longitude: null,
+        lastSeenDate: null,
+        lastUpdateDate: new Date(Date.now() - (TARGET_MAX_AGE + 60) * 1000),
+      });
+      put(ctx("2"), {
+        latitude: null,
+        longitude: null,
+        lastSeenDate: null,
+        lastUpdateDate: new Date(),
+      });
+
+      updateVessels();
+
+      expect(vessels[ctx("1")]).toBeUndefined();
+      expect(vessels[ctx("2")]).toBeDefined();
+    });
+
     it("marks a quiet but not yet expired target as lost", () => {
       setupOwnVessel();
       const target = put(ctx("1"), {

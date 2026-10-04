@@ -66,6 +66,23 @@ describe("toRad / toDeg", () => {
 });
 
 describe("calcProjection", () => {
+  it("measures across the antimeridian the short way", () => {
+    // ~5.76 NM apart either side of 180 near fiji
+    const me = vessel({ latitude: -16.5, longitude: 179.95 });
+    const p = calcProjection(
+      vessel({ latitude: -16.5, longitude: -179.95 }),
+      me,
+    )!;
+    expect(calcRange(p) / METERS_PER_NM).toBeCloseTo(5.76, 1);
+    expect(calcBearing(p)).toBeCloseTo(90, 0);
+
+    const back = calcProjection(
+      me,
+      vessel({ latitude: -16.5, longitude: -179.95 }),
+    )!;
+    expect(calcBearing(back)).toBeCloseTo(270, 0);
+  });
+
   it("gives up when either vessel has no position", () => {
     const me = vessel();
     expect(calcProjection(vessel({ latitude: null }), me)).toBeUndefined();
@@ -142,9 +159,26 @@ describe("calcBearing", () => {
 });
 
 describe("calcVelocity", () => {
-  it("treats a vessel with no sog or cog as stopped, so cpa can still run", () => {
+  it("treats a vessel with no sog as stopped, so cpa can still run", () => {
     expect(calcVelocity(vessel({ sog: null, cog: 0 }))).toEqual({ x: 0, y: 0 });
-    expect(calcVelocity(vessel({ sog: 5, cog: null }))).toEqual({ x: 0, y: 0 });
+    expect(calcVelocity(vessel({ sog: null, cog: null }))).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  it("treats a barely moving vessel as stopped whatever its course", () => {
+    // gps sog noise at anchor, with no cog
+    expect(calcVelocity(vessel({ sog: knots(0.3), cog: null }))).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  // ais sends "not available" for cog, and calling a moving ship stopped could
+  // turn a crossing ship into one that is safely opening
+  it("gives no velocity for a moving vessel on an unknown course", () => {
+    expect(calcVelocity(vessel({ sog: knots(15), cog: null }))).toBeUndefined();
   });
 
   it("gives no velocity for a sog or cog that is present but not a number", () => {
@@ -403,6 +437,34 @@ describe("calcAlarms", () => {
     const { range, sog, cpa, tcpa, mmsi = null } = { ...noAlarm, ...o };
     return calcAlarms(offshore, range, sog, cpa, tcpa, mmsi);
   }
+
+  it("ranks an imminent collision above an opening guard-zone target in the danger band", () => {
+    const guard: CollisionProfile = {
+      ...offshore,
+      guard: { range: 1, speed: 0 },
+    };
+    // opening, 0.2 NM off: guard alarm, no tcpa or cpa
+    const opening = calcAlarms(
+      guard,
+      0.2 * METERS_PER_NM,
+      0,
+      undefined,
+      undefined,
+      null,
+    );
+    // 2 minutes to a 0 NM cpa, 0.5 NM off
+    const collision = calcAlarms(
+      guard,
+      0.5 * METERS_PER_NM,
+      knots(10),
+      0,
+      120,
+      null,
+    );
+    expect(opening.alarmState).toBe("danger");
+    expect(collision.alarmState).toBe("danger");
+    expect(collision.order!).toBeLessThan(opening.order!);
+  });
 
   it("raises no alarm for a distant target", () => {
     const a = alarms({ range: 50 * METERS_PER_NM });

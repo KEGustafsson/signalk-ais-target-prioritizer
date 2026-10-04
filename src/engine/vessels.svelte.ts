@@ -11,11 +11,16 @@ export const vesselsState = $state<{
   selectedVesselContext: null,
 });
 
+// the mmsi is normally filled in from the vessel's static data, but sart, mob and
+// epirb beacons may never send any - and their alarms key off the mmsi prefix. so
+// start from the one in the context, which every ais target carries.
+const CONTEXT_MMSI = /:mmsi:(\d{9})$/;
+
 export function createVessel(context: Context): Vessel {
   return {
     // raw properties from signal k:
     context,
-    mmsi: null,
+    mmsi: CONTEXT_MMSI.exec(context)?.[1] ?? null,
     name: null,
     callsign: null,
     imo: null,

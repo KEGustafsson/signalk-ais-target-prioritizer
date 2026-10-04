@@ -52,6 +52,15 @@ function updateVesselsLoop() {
   timeoutId = setTimeout(updateVesselsLoop, DATA_REFRESH_INTERVAL);
 }
 
+// how long since we heard from a vessel. by its last position when it has one; a
+// vessel that has only ever sent static data, or only invalid positions, goes by its
+// last delta of any kind instead - otherwise it would never age out at all
+function ageSeconds(vessel: Vessel): number {
+  if (vessel.lastSeenSecondsAgo !== undefined) return vessel.lastSeenSecondsAgo;
+  if (!vessel.lastUpdateDate) return 0;
+  return (Date.now() - vessel.lastUpdateDate.getTime()) / 1000;
+}
+
 export function updateVessels() {
   flushPendingUpdates();
 
@@ -121,11 +130,7 @@ export function updateVessels() {
       vessel.alarmState = alarmState;
       vessel.order = order;
 
-      if (
-        AGE_OUT_OLD_TARGETS &&
-        vessel.lastSeenSecondsAgo !== undefined &&
-        vessel.lastSeenSecondsAgo > TARGET_MAX_AGE
-      ) {
+      if (AGE_OUT_OLD_TARGETS && ageSeconds(vessel) > TARGET_MAX_AGE) {
         deleteVessel(vessel);
       }
     }
