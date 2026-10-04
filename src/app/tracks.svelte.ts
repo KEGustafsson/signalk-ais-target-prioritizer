@@ -11,15 +11,18 @@ import {
 import type { Tracks } from "../types";
 import { getTrackResolution, getTracks } from "./utils/api";
 
-export const tracksState = $state<{
+// a plain object, not $state: only the map's update loop reads it, and a deep $state
+// proxy over thousands of coordinate arrays cost hundreds of milliseconds per tick
+// (and hundreds of MB) for reactivity nothing used
+export const tracksState: {
   tracks: Tracks;
   available: boolean;
   resolution: number;
-}>({
+} = {
   tracks: {},
   available: false,
   resolution: DEFAULT_TRACK_RESOLUTION,
-});
+};
 
 let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
@@ -46,18 +49,25 @@ export async function refreshTracks() {
   }
 }
 
+let running = false;
+
 export function startTracksLoop() {
-  if (timeoutId) return;
+  if (running) return;
+  running = true;
   refreshResolution();
   tracksLoop();
 }
 
-function tracksLoop() {
-  refreshTracks();
+// wait for each poll before scheduling the next, so a download slower than the
+// interval cannot overlap the next one and land out of order
+async function tracksLoop() {
+  await refreshTracks();
+  if (!running) return;
   timeoutId = setTimeout(tracksLoop, TRACKS_REFRESH_INTERVAL);
 }
 
 export function stopTracksLoop() {
+  running = false;
   clearTimeout(timeoutId);
   timeoutId = undefined;
 }

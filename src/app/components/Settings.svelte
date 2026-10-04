@@ -18,7 +18,7 @@
   import { ns } from "../utils/noSleep.svelte";
   import { pushMuteAllAlarms, saveCollisionProfiles } from "../utils/api";
   import { collisionProfiles } from "../../engine/collisionProfiles.svelte";
-  import { type ProfileName } from "../../types";
+  import type { ProfileName } from "../../types";
   import { onMount } from "svelte";
   import {
     checkFontsAvailable,

@@ -1,4 +1,4 @@
-import { type Chart } from "../types";
+import type { Chart } from "../types";
 import { getCharts } from "./utils/api";
 
 /*
