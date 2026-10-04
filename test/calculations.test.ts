@@ -147,9 +147,11 @@ describe("calcVelocity", () => {
     expect(calcVelocity(vessel({ sog: 5, cog: null }))).toEqual({ x: 0, y: 0 });
   });
 
-  it("treats a NaN sog or cog as stopped too", () => {
-    expect(calcVelocity(vessel({ sog: NaN, cog: 0 }))).toEqual({ x: 0, y: 0 });
-    expect(calcVelocity(vessel({ sog: 5, cog: NaN }))).toEqual({ x: 0, y: 0 });
+  it("gives no velocity for a sog or cog that is present but not a number", () => {
+    // calling it stopped could invent a collision course with a vessel that is
+    // actually keeping pace, so the cpa calc must not run at all
+    expect(calcVelocity(vessel({ sog: NaN, cog: 0 }))).toBeUndefined();
+    expect(calcVelocity(vessel({ sog: 5, cog: Infinity }))).toBeUndefined();
   });
 
   it("resolves course into components", () => {
@@ -249,6 +251,15 @@ describe("calcCpaLocation", () => {
     expect(calcCpaLocation(vessel({ sog: 5, cog: null }), 60)).toBeUndefined();
   });
 
+  it("gives up rather than throwing on a value that is not a number", () => {
+    const v = { latitude: 0, longitude: 0, sog: 5, cog: 0 };
+    expect(calcCpaLocation(vessel({ ...v, sog: NaN }), 60)).toBeUndefined();
+    expect(
+      calcCpaLocation(vessel({ ...v, latitude: NaN }), 60),
+    ).toBeUndefined();
+    expect(calcCpaLocation(vessel(v), NaN)).toBeUndefined();
+  });
+
   it("projects along the course by speed times tcpa", () => {
     const v = vessel({ latitude: 0, longitude: 0, sog: knots(10), cog: NORTH });
     const [lon, lat] = calcCpaLocation(v, 360)!;
@@ -277,6 +288,14 @@ describe("calcPredictedLocation", () => {
     expect(calcPredictedLocation(vessel({ latitude: null }))).toBeUndefined();
     expect(
       calcPredictedLocation(vessel({ sog: null, cog: 0 })),
+    ).toBeUndefined();
+  });
+
+  it("gives up rather than throwing on a value that is not a number", () => {
+    const v = { latitude: 0, longitude: 0, sog: 5, cog: 0 };
+    expect(calcPredictedLocation(vessel({ ...v, sog: NaN }))).toBeUndefined();
+    expect(
+      calcPredictedLocation(vessel({ ...v, cog: Infinity })),
     ).toBeUndefined();
   });
 

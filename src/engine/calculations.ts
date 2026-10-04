@@ -50,9 +50,12 @@ export function calcBearing(p: Vector2D): number {
 }
 
 // sog in m/s, cog in radians
-export function calcVelocity(v: Vessel): Vector2D {
+export function calcVelocity(v: Vessel): Vector2D | undefined {
   // if we dont have sog or cog, assume the vessel is not moving and proceed with cpa calc
-  if (!isValidNumber(v.sog) || !isValidNumber(v.cog)) return { x: 0, y: 0 };
+  if (v.sog == null || v.cog == null) return { x: 0, y: 0 };
+  // but a value that is present and not a number says nothing about how the vessel
+  // is moving - calling it stopped could invent a collision course, so no cpa at all
+  if (!isValidNumber(v.sog) || !isValidNumber(v.cog)) return;
 
   return {
     x: v.sog * Math.sin(v.cog),
@@ -62,8 +65,8 @@ export function calcVelocity(v: Vessel): Vector2D {
 
 export function calcCpa(
   projection: Vector2D,
-  velocity: Vector2D,
-  myVelocity: Vector2D,
+  velocity: Vector2D | undefined,
+  myVelocity: Vector2D | undefined,
 ): { tcpa: number; cpa: number } | undefined {
   if (!projection || !velocity || !myVelocity) return;
 
@@ -93,13 +96,15 @@ export function calcCpa(
   };
 }
 
+// turf's destination() throws on a non-number, and one bad vessel would then abort
+// the whole update pass - so these check for real numbers, not just for null
 export function calcCpaLocation(v: Vessel, tcpa: number): Position | undefined {
   if (
-    v.latitude === null ||
-    v.longitude === null ||
-    v.cog === null ||
-    v.sog === null ||
-    tcpa === undefined
+    !isValidNumber(v.latitude) ||
+    !isValidNumber(v.longitude) ||
+    !isValidNumber(v.cog) ||
+    !isValidNumber(v.sog) ||
+    !isValidNumber(tcpa)
   )
     return;
 
@@ -127,10 +132,10 @@ export function calcCpaLocation(v: Vessel, tcpa: number): Position | undefined {
 
 export function calcPredictedLocation(v: Vessel): Position | undefined {
   if (
-    v.latitude === null ||
-    v.longitude === null ||
-    v.cog === null ||
-    v.sog === null
+    !isValidNumber(v.latitude) ||
+    !isValidNumber(v.longitude) ||
+    !isValidNumber(v.cog) ||
+    !isValidNumber(v.sog)
   )
     return;
 

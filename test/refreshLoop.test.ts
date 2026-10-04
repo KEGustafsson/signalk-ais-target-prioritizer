@@ -131,6 +131,23 @@ describe("updateVessels", () => {
       expect(target.cpa! / METERS_PER_NM).toBeLessThan(0.1);
     });
 
+    it("raises no cpa alarm off a sog that is present but not a number", () => {
+      // we close at 10 kn on a target 1 NM ahead that is really keeping pace. read as
+      // stopped, its unusable sog would put it on a collision course
+      setupOwnVessel({ sog: knots(10), cog: NORTH });
+      const target = put(ctx("1"), {
+        latitude: nmNorth(1),
+        sog: NaN,
+        cog: NORTH,
+      });
+
+      updateVessels();
+
+      expect(target.cpa).toBeUndefined();
+      expect(target.tcpa).toBeUndefined();
+      expect(target.alarmState).toBeNull();
+    });
+
     it("leaves cpa unset for a target opening away from us", () => {
       setupOwnVessel();
       const target = put(ctx("1"), {
