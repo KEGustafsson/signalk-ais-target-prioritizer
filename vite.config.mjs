@@ -41,6 +41,10 @@ export default defineConfig({
   },
   test: {
     setupFiles: ["./test/setup.ts"],
+    // ci also runs the suite on armv7 under qemu emulation (cerbo gx), where the
+    // first component render in a file alone takes over vitest's 5s default. a
+    // slow runner is not a failing test, so give each test more headroom.
+    testTimeout: 30_000,
     coverage: {
       // istanbul instruments the source; the v8 provider loses track of files
       // once vite has transformed them and silently omits them from the report
