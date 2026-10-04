@@ -196,6 +196,27 @@ describe("the polling loop", () => {
     expect(getTracks).toHaveBeenCalledTimes(3);
   });
 
+  it("does not let a stale loop's fetch overwrite the current tracks", async () => {
+    vi.useFakeTimers();
+    getTrackResolution.mockResolvedValue(60000);
+    let releaseStale!: (t: Tracks) => void;
+    getTracks.mockReturnValueOnce(
+      new Promise<Tracks>((r) => (releaseStale = r)),
+    );
+    const current = payload();
+    getTracks.mockResolvedValue(current);
+
+    startTracksLoop(); // fetch 1 - left pending
+    stopTracksLoop();
+    startTracksLoop(); // fetch 2 returns the current tracks
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tracksState.tracks).toEqual(current);
+
+    releaseStale({}); // the old fetch comes back late, with stale data
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tracksState.tracks).toEqual(current);
+  });
+
   it("is safe to stop when never started", () => {
     expect(() => stopTracksLoop()).not.toThrow();
   });

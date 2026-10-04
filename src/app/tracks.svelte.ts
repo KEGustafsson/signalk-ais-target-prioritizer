@@ -38,11 +38,19 @@ async function refreshResolution() {
   }
 }
 
-export async function refreshTracks() {
+// expectedGeneration, when given, is the polling loop's generation: a fetch that
+// comes back after the loop was stopped (and maybe restarted) must not overwrite
+// the tracks with what it fetched
+export async function refreshTracks(expectedGeneration?: number) {
+  const stale = () =>
+    expectedGeneration !== undefined && expectedGeneration !== generation;
   try {
-    tracksState.tracks = await getTracks();
+    const tracks = await getTracks();
+    if (stale()) return;
+    tracksState.tracks = tracks;
     tracksState.available = true;
   } catch {
+    if (stale()) return;
     // the tracks plugin is optional - trails are simply absent without it
     tracksState.tracks = {};
     tracksState.available = false;
@@ -66,7 +74,7 @@ export function startTracksLoop() {
 // wait for each poll before scheduling the next, so a download slower than the
 // interval cannot overlap the next one and land out of order
 async function tracksLoop(gen: number) {
-  await refreshTracks();
+  await refreshTracks(gen);
   if (!running || gen !== generation) return;
   timeoutId = setTimeout(() => tracksLoop(gen), TRACKS_REFRESH_INTERVAL);
 }

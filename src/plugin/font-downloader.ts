@@ -37,6 +37,34 @@ export function isFontPackEntry(filePath: string, entry: object): boolean {
 
 let downloading = false;
 
+// swap the staged fonts/ and sprites/ in for the live ones as a unit. the live
+// folders are moved aside (into the staging folder, so the finally that removes it
+// cleans them up), not deleted: if any step fails, everything moved so far is put
+// back, so a failure leaves the previous pack intact rather than half replaced
+function installStagedPack(assetsDir: string, staging: string) {
+  const backedUp: { live: string; backup: string }[] = [];
+  const installed: string[] = [];
+  try {
+    for (const dir of PACK_DIRS) {
+      const staged = path.join(staging, dir);
+      if (!existsSync(staged)) continue;
+      const live = path.join(assetsDir, dir);
+      if (existsSync(live)) {
+        const backup = path.join(staging, `previous-${dir}`);
+        renameSync(live, backup);
+        backedUp.push({ live, backup });
+      }
+      renameSync(staged, live);
+      installed.push(live);
+    }
+  } catch (err) {
+    for (const live of installed)
+      rmSync(live, { recursive: true, force: true });
+    for (const { live, backup } of backedUp) renameSync(backup, live);
+    throw err;
+  }
+}
+
 export function registerAssetEndpoints(
   router: IRouter,
   assetsDir: string = ASSETS_DIR,
@@ -87,13 +115,7 @@ export function registerAssetEndpoints(
         throw new Error("font pack contained no fonts");
       }
 
-      for (const dir of PACK_DIRS) {
-        const staged = path.join(staging, dir);
-        if (!existsSync(staged)) continue;
-        const live = path.join(assetsDir, dir);
-        rmSync(live, { recursive: true, force: true });
-        renameSync(staged, live);
-      }
+      installStagedPack(assetsDir, staging);
 
       res.json({ success: true });
     } catch (err) {
