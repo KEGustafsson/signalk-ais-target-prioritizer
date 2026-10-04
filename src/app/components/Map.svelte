@@ -943,7 +943,7 @@
         "Error",
         `Not connected to Signal K server.\nCurrent connection status: ${ingestion.connectionState}`,
       );
-    } else if (!vesselsState.myVesselContext) {
+    } else if (!myVessel) {
       showNotification(
         "Error",
         "No data for our own vessel received from Signal K server",

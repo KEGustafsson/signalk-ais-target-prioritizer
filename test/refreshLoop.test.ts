@@ -64,6 +64,15 @@ describe("updateVessels", () => {
     expect(target.bearing).toBeUndefined();
   });
 
+  it("stays quiet while our own vessel has no data yet - a normal startup state", () => {
+    vesselsState.myVesselContext = MINE;
+    put(ctx("1"), { latitude: nmNorth(1) });
+
+    updateVessels();
+
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
   it("derives range and bearing for a target", () => {
     setupOwnVessel();
     const target = put(ctx("1"), { latitude: nmNorth(2) });

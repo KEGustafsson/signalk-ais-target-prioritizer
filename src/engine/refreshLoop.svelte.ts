@@ -55,10 +55,11 @@ function updateVesselsLoop() {
 export function updateVessels() {
   flushPendingUpdates();
 
-  if (!myVessel) {
-    console.warn("no data for myVessel", { myVessel });
-    return;
-  }
+  // everything is relative to our own vessel, so there is nothing to work out until
+  // its first delta arrives. that is a normal state - the first tick always lands
+  // before any data - and each caller already reports it: the plugin as its status,
+  // the webapp as an error once past warm-up. so no logging here.
+  if (!myVessel) return;
 
   const myVelocity = calcVelocity(myVessel);
 
