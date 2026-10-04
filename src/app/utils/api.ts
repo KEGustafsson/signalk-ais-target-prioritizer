@@ -99,18 +99,29 @@ export async function getMutedVessels() {
   return data;
 }
 
+// the mute pushes are fire-and-forget from the ui: the local mute has already been
+// applied, so a failure here (plugin not running, or not tracking that vessel
+// because its own calculations are off) is logged rather than left unhandled
 export async function pushMuteAllAlarms() {
-  await ky.post(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
-    credentials: "include",
-  });
+  try {
+    await ky.post(`/plugins/${PLUGIN_ID}/muteAllAlarms`, {
+      credentials: "include",
+    });
+  } catch (e) {
+    console.warn("unable to push muteAllAlarms to the plugin", e);
+  }
 }
 
 export async function pushAlarmIsMuted(
   context: Context,
   alarmIsMuted: boolean,
 ) {
-  await ky.put(`/plugins/${PLUGIN_ID}/setAlarmIsMuted`, {
-    credentials: "include",
-    json: { context, alarmIsMuted },
-  });
+  try {
+    await ky.put(`/plugins/${PLUGIN_ID}/setAlarmIsMuted`, {
+      credentials: "include",
+      json: { context, alarmIsMuted },
+    });
+  } catch (e) {
+    console.warn("unable to push alarmIsMuted to the plugin", e);
+  }
 }
