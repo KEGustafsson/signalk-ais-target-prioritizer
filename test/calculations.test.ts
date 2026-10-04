@@ -66,11 +66,36 @@ describe("toRad / toDeg", () => {
 });
 
 describe("calcProjection", () => {
+  it("measures across the antimeridian the short way", () => {
+    // ~5.76 NM apart either side of 180 near fiji
+    const me = vessel({ latitude: -16.5, longitude: 179.95 });
+    const p = calcProjection(
+      vessel({ latitude: -16.5, longitude: -179.95 }),
+      me,
+    )!;
+    expect(calcRange(p) / METERS_PER_NM).toBeCloseTo(5.76, 1);
+    expect(calcBearing(p)).toBeCloseTo(90, 0);
+
+    const back = calcProjection(
+      me,
+      vessel({ latitude: -16.5, longitude: -179.95 }),
+    )!;
+    expect(calcBearing(back)).toBeCloseTo(270, 0);
+  });
+
   it("gives up when either vessel has no position", () => {
     const me = vessel();
     expect(calcProjection(vessel({ latitude: null }), me)).toBeUndefined();
     expect(calcProjection(vessel({ longitude: null }), me)).toBeUndefined();
     expect(calcProjection(me, vessel({ latitude: null }))).toBeUndefined();
+  });
+
+  it("gives up on an undefined or NaN coordinate rather than returning NaN", () => {
+    const me = vessel();
+    const undef = undefined as unknown as null;
+    expect(calcProjection(vessel({ latitude: undef }), me)).toBeUndefined();
+    expect(calcProjection(vessel({ longitude: NaN }), me)).toBeUndefined();
+    expect(calcProjection(me, vessel({ longitude: undef }))).toBeUndefined();
   });
 
   it("puts north in +y and east in +x", () => {
@@ -134,9 +159,33 @@ describe("calcBearing", () => {
 });
 
 describe("calcVelocity", () => {
-  it("treats a vessel with no sog or cog as stopped, so cpa can still run", () => {
+  it("treats a vessel with no sog as stopped, so cpa can still run", () => {
     expect(calcVelocity(vessel({ sog: null, cog: 0 }))).toEqual({ x: 0, y: 0 });
-    expect(calcVelocity(vessel({ sog: 5, cog: null }))).toEqual({ x: 0, y: 0 });
+    expect(calcVelocity(vessel({ sog: null, cog: null }))).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  it("treats a barely moving vessel as stopped whatever its course", () => {
+    // gps sog noise at anchor, with no cog
+    expect(calcVelocity(vessel({ sog: knots(0.3), cog: null }))).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  // ais sends "not available" for cog, and calling a moving ship stopped could
+  // turn a crossing ship into one that is safely opening
+  it("gives no velocity for a moving vessel on an unknown course", () => {
+    expect(calcVelocity(vessel({ sog: knots(15), cog: null }))).toBeUndefined();
+  });
+
+  it("gives no velocity for a sog or cog that is present but not a number", () => {
+    // calling it stopped could invent a collision course with a vessel that is
+    // actually keeping pace, so the cpa calc must not run at all
+    expect(calcVelocity(vessel({ sog: NaN, cog: 0 }))).toBeUndefined();
+    expect(calcVelocity(vessel({ sog: 5, cog: Infinity }))).toBeUndefined();
   });
 
   it("resolves course into components", () => {
@@ -175,6 +224,16 @@ describe("calcCpa", () => {
     const velocity = calcVelocity(vessel({ sog: knots(10), cog: NORTH }));
 
     expect(calcCpa(projection, velocity, stopped)).toBeUndefined();
+  });
+
+  it("returns nothing rather than NaN when an input is not a number", () => {
+    const velocity = calcVelocity(vessel({ sog: knots(10), cog: SOUTH }));
+    expect(calcCpa({ x: NaN, y: METERS_PER_NM }, velocity, stopped)).toBe(
+      undefined,
+    );
+    expect(
+      calcCpa({ x: 0, y: METERS_PER_NM }, { x: Infinity, y: 0 }, stopped),
+    ).toBeUndefined();
   });
 
   it("returns nothing when there is no relative motion", () => {
@@ -226,6 +285,15 @@ describe("calcCpaLocation", () => {
     expect(calcCpaLocation(vessel({ sog: 5, cog: null }), 60)).toBeUndefined();
   });
 
+  it("gives up rather than throwing on a value that is not a number", () => {
+    const v = { latitude: 0, longitude: 0, sog: 5, cog: 0 };
+    expect(calcCpaLocation(vessel({ ...v, sog: NaN }), 60)).toBeUndefined();
+    expect(
+      calcCpaLocation(vessel({ ...v, latitude: NaN }), 60),
+    ).toBeUndefined();
+    expect(calcCpaLocation(vessel(v), NaN)).toBeUndefined();
+  });
+
   it("projects along the course by speed times tcpa", () => {
     const v = vessel({ latitude: 0, longitude: 0, sog: knots(10), cog: NORTH });
     const [lon, lat] = calcCpaLocation(v, 360)!;
@@ -254,6 +322,14 @@ describe("calcPredictedLocation", () => {
     expect(calcPredictedLocation(vessel({ latitude: null }))).toBeUndefined();
     expect(
       calcPredictedLocation(vessel({ sog: null, cog: 0 })),
+    ).toBeUndefined();
+  });
+
+  it("gives up rather than throwing on a value that is not a number", () => {
+    const v = { latitude: 0, longitude: 0, sog: 5, cog: 0 };
+    expect(calcPredictedLocation(vessel({ ...v, sog: NaN }))).toBeUndefined();
+    expect(
+      calcPredictedLocation(vessel({ ...v, cog: Infinity })),
     ).toBeUndefined();
   });
 
@@ -361,6 +437,34 @@ describe("calcAlarms", () => {
     const { range, sog, cpa, tcpa, mmsi = null } = { ...noAlarm, ...o };
     return calcAlarms(offshore, range, sog, cpa, tcpa, mmsi);
   }
+
+  it("ranks an imminent collision above an opening guard-zone target in the danger band", () => {
+    const guard: CollisionProfile = {
+      ...offshore,
+      guard: { range: 1, speed: 0 },
+    };
+    // opening, 0.2 NM off: guard alarm, no tcpa or cpa
+    const opening = calcAlarms(
+      guard,
+      0.2 * METERS_PER_NM,
+      0,
+      undefined,
+      undefined,
+      null,
+    );
+    // 2 minutes to a 0 NM cpa, 0.5 NM off
+    const collision = calcAlarms(
+      guard,
+      0.5 * METERS_PER_NM,
+      knots(10),
+      0,
+      120,
+      null,
+    );
+    expect(opening.alarmState).toBe("danger");
+    expect(collision.alarmState).toBe("danger");
+    expect(collision.order!).toBeLessThan(opening.order!);
+  });
 
   it("raises no alarm for a distant target", () => {
     const a = alarms({ range: 50 * METERS_PER_NM });

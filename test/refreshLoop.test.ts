@@ -64,6 +64,15 @@ describe("updateVessels", () => {
     expect(target.bearing).toBeUndefined();
   });
 
+  it("stays quiet while our own vessel has no data yet - a normal startup state", () => {
+    vesselsState.myVesselContext = MINE;
+    put(ctx("1"), { latitude: nmNorth(1) });
+
+    updateVessels();
+
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
   it("derives range and bearing for a target", () => {
     setupOwnVessel();
     const target = put(ctx("1"), { latitude: nmNorth(2) });
@@ -120,6 +129,23 @@ describe("updateVessels", () => {
 
       expect(target.tcpa).toBeCloseTo(METERS_PER_NM / knots(10), 0);
       expect(target.cpa! / METERS_PER_NM).toBeLessThan(0.1);
+    });
+
+    it("raises no cpa alarm off a sog that is present but not a number", () => {
+      // we close at 10 kn on a target 1 NM ahead that is really keeping pace. read as
+      // stopped, its unusable sog would put it on a collision course
+      setupOwnVessel({ sog: knots(10), cog: NORTH });
+      const target = put(ctx("1"), {
+        latitude: nmNorth(1),
+        sog: NaN,
+        cog: NORTH,
+      });
+
+      updateVessels();
+
+      expect(target.cpa).toBeUndefined();
+      expect(target.tcpa).toBeUndefined();
+      expect(target.alarmState).toBeNull();
     });
 
     it("leaves cpa unset for a target opening away from us", () => {
@@ -274,6 +300,27 @@ describe("updateVessels", () => {
       updateVessels();
 
       expect(vessels[ctx("1")]).toBeUndefined();
+    });
+
+    it("ages out a target that never sent a position, by its last delta", () => {
+      setupOwnVessel();
+      put(ctx("1"), {
+        latitude: null,
+        longitude: null,
+        lastSeenDate: null,
+        lastUpdateDate: new Date(Date.now() - (TARGET_MAX_AGE + 60) * 1000),
+      });
+      put(ctx("2"), {
+        latitude: null,
+        longitude: null,
+        lastSeenDate: null,
+        lastUpdateDate: new Date(),
+      });
+
+      updateVessels();
+
+      expect(vessels[ctx("1")]).toBeUndefined();
+      expect(vessels[ctx("2")]).toBeDefined();
     });
 
     it("marks a quiet but not yet expired target as lost", () => {

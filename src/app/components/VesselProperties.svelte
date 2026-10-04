@@ -241,7 +241,7 @@
 
                   <dd class=" sm:col-span-2">
                     {isValidNumber(selectedVessel.rot)
-                      ? formatRateOfTurn(toDeg(selectedVessel.rot))
+                      ? formatRateOfTurn(selectedVessel.rot)
                       : "---"}
                   </dd>
                 </div>

@@ -8,11 +8,27 @@ export const DEFAULT_MAXIMUM_TARGET_RANGE = 50; // NM
 export const DEFAULT_ENABLE_DATA_PUBLISHING = true;
 export const DEFAULT_ENABLE_ALARM_PUBLISHING = true;
 
+// the plugin only republishes a target's navigation.closestApproach when one of
+// these has moved by more than the threshold (or its alarm state changed) - and
+// at least every PUBLISH_MAX_INTERVAL regardless, so the values never look stale.
+export const PUBLISH_THRESHOLDS = {
+  CPA_METERS: 10,
+  TCPA_SECONDS: 5,
+  RANGE_METERS: 10,
+  BEARING_DEGREES: 1,
+};
+export const PUBLISH_MAX_INTERVAL = 30_000; // milliseconds
+
 export const AGE_OUT_OLD_TARGETS = true;
 export const TARGET_MAX_AGE = 30 * 60; // max age in seconds - 30 minutes
 export const NO_GPS_FIX_WARNING = 60; // seconds
 
 export const COURSE_PROJECTION_MINUTES = 10; // 10 minutes
+
+// below this a vessel counts as stopped for cpa, whether or not its course is known.
+// set above the speed noise of a gps at anchor or alongside (a few tenths of a knot,
+// often with no cog at all), so a boat sitting still keeps its cpa calculations
+export const STOPPED_SOG = 0.5 / KNOTS_PER_M_PER_S; // m/s - 0.5 kn
 export const LOST_VESSEL_WARNING_AGE = 10 * 60; // 10 minutes
 export const LOST_VESSEL_DELETE_AGE = 30 * 60; // 30 minutes
 export const SHOW_ALARMS_INTERVAL = 60_000; // every 60 seconds
@@ -78,8 +94,9 @@ export const ORDER_WARNING = 2 * ORDER_BAND;
 export const ORDER_CLOSING = 3 * ORDER_BAND;
 export const ORDER_OPENING = 4 * ORDER_BAND;
 
-// the most any single tie breaker can contribute. the worst case is two of them
-// plus the no-range penalty, which stays under two thirds of a band.
+// the most any single tie breaker can contribute. the worst case is all three at
+// their maximum (a missing tcpa or cpa scores the maximum) plus one for no range at
+// all - 60001 - which stays under two thirds of a band.
 export const TIEBREAK_MAX = ORDER_BAND / 5;
 
 // at or beyond these, values all score TIEBREAK_MAX - they are already far enough

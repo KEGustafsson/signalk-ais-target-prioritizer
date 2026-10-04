@@ -28,7 +28,6 @@ describe("createVessel", () => {
   it("starts every signal k field null rather than undefined, so absent and unset are the same thing", () => {
     const v = createVessel(ctx("230000001"));
     for (const field of [
-      "mmsi",
       "name",
       "callsign",
       "imo",
@@ -42,6 +41,18 @@ describe("createVessel", () => {
     ] as const) {
       expect(v[field], field).toBeNull();
     }
+  });
+
+  // sart, mob and epirb beacons may never send static data, and their alarms key
+  // off the mmsi prefix - so it has to be there from the first delta
+  it("takes the mmsi from an ais context", () => {
+    expect(createVessel(ctx("970123456")).mmsi).toBe("970123456");
+  });
+
+  it("leaves the mmsi null for a context without one", () => {
+    expect(
+      createVessel("vessels.urn:mrn:signalk:uuid:abc" as Context).mmsi,
+    ).toBeNull();
   });
 
   it("starts unmuted, not lost and not yet valid", () => {

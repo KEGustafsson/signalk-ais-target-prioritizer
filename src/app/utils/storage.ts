@@ -4,10 +4,21 @@ import { name as PLUGIN_ID } from "../../../package.json";
 // like "theme" collide across them
 const PREFIX = `${PLUGIN_ID}.`;
 
+// storage can be unavailable outright - blocked by browser policy, or a private
+// window - and getItem then throws. these are read at module load, so a throw would
+// stop the whole webapp from starting; carry on without persistence instead.
 export function getStored(key: string): string | null {
-  return localStorage.getItem(PREFIX + key);
+  try {
+    return localStorage.getItem(PREFIX + key);
+  } catch {
+    return null;
+  }
 }
 
 export function setStored(key: string, value: string) {
-  localStorage.setItem(PREFIX + key, value);
+  try {
+    localStorage.setItem(PREFIX + key, value);
+  } catch {
+    // not persisted - nothing else to do
+  }
 }

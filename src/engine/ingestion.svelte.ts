@@ -2,6 +2,7 @@
 
 import { WebSocket } from "partysocket";
 import { createVessel, vessels, vesselsState } from "./vessels.svelte";
+import { isValidLatLng } from "./calculations";
 import type {
   Context,
   Delta,
@@ -37,14 +38,20 @@ const pendingUpdates = new Map();
 // ==============================
 // Process Vessel Updates
 // ==============================
-function upsertVessel(context: Context, updates: Update[]) {
-  if (!context) return;
+// a signal k context is a dotted path such as "vessels.urn:mrn:imo:mmsi:..." or
+// "atons.urn:...". anything else - "__proto__" and friends included - must never
+// become a key on the vessels object.
+const CONTEXT_PATTERN = /^[a-z]+\.[^.]/i;
 
-  if (!(context in vessels)) {
+function upsertVessel(context: Context, updates: Update[]) {
+  if (typeof context !== "string" || !CONTEXT_PATTERN.test(context)) return;
+
+  if (!Object.hasOwn(vessels, context)) {
     vessels[context] = createVessel(context);
   }
 
   const vessel = vessels[context];
+  vessel.lastUpdateDate = new Date();
 
   if (!updates) return;
   for (const update of updates) {
@@ -56,26 +63,37 @@ function upsertVessel(context: Context, updates: Update[]) {
           switch (path) {
             case "":
               // NOTE all of these may be in the same (single) "value" - so no "else"
-              if (v.mmsi) {
-                vessel.mmsi = v.mmsi ?? "";
+              // these come from other plugins and gateways as well as ais, so check
+              // the type rather than trust it - a number where a string belongs
+              // used to throw here
+              if (isNonEmptyString(v.mmsi)) {
+                vessel.mmsi = v.mmsi;
               }
-              if (v.name) {
-                vessel.name = v.name ?? "";
+              if (isNonEmptyString(v.name)) {
+                vessel.name = v.name;
               }
-              if (v.communication?.callsignVhf) {
+              if (isNonEmptyString(v.communication?.callsignVhf)) {
                 vessel.callsign = v.communication.callsignVhf;
               }
-              if (v.registrations?.imo) {
+              if (isNonEmptyString(v.registrations?.imo)) {
                 vessel.imo = v.registrations.imo.replace(/imo /i, "");
               }
               break;
-            case "navigation.position":
+            case "navigation.position": {
+              // a position missing a coordinate, or out of range, is not a fix -
+              // keep the last good one rather than turning it into undefined/NaN,
+              // and do not count it as the vessel having been seen
+              if (!isValidLatLng(v.latitude, v.longitude)) break;
               vessel.latitude = v.latitude;
               vessel.longitude = v.longitude;
-              vessel.lastSeenDate = update.timestamp
+              const timestamp = update.timestamp
                 ? new Date(update.timestamp as string)
                 : new Date();
+              vessel.lastSeenDate = Number.isNaN(timestamp.getTime())
+                ? new Date()
+                : timestamp;
               break;
+            }
             case "navigation.courseOverGroundTrue":
               vessel.cog = v ?? 0;
               break;
@@ -272,7 +290,17 @@ export function stop() {
   }
 }
 
+// drop anything queued but not yet applied - the plugin calls this on start, so a
+// restart does not replay deltas from before it stopped
+export function clearPendingUpdates() {
+  pendingUpdates.clear();
+}
+
 let flushInProgress = false;
+
+function isNonEmptyString(x: unknown): x is string {
+  return typeof x === "string" && x.length > 0;
+}
 
 export function flushPendingUpdates() {
   // console.log("ENTER flushPendingUpdates", flushInProgress);
@@ -284,17 +312,25 @@ export function flushPendingUpdates() {
   // const start = performance.now();
   const updateCount = pendingUpdates.size;
 
-  if (updateCount > 0) {
-    for (const [context, updates] of pendingUpdates) {
-      upsertVessel(context, updates);
+  try {
+    if (updateCount > 0) {
+      for (const [context, updates] of pendingUpdates) {
+        // one malformed delta must cost only itself. a throw here used to leave
+        // flushInProgress set for good, so every later flush returned early, no
+        // update was ever applied again and the queue grew without bound
+        try {
+          upsertVessel(context, updates);
+        } catch (err) {
+          console.warn("dropping malformed update", context, err);
+        }
+      }
+      // console.log(
+      //   `flushed ${updateCount} updates in ${(performance.now() - start).toFixed(1)} ms`,
+      // );
     }
-
+  } finally {
     pendingUpdates.clear();
-    // console.log(
-    //   `flushed ${updateCount} updates in ${(performance.now() - start).toFixed(1)} ms`,
-    // );
+    // console.log("EXIT flushPendingUpdates");
+    flushInProgress = false;
   }
-
-  // console.log("EXIT flushPendingUpdates");
-  flushInProgress = false;
 }

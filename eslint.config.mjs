@@ -25,6 +25,10 @@ export default defineConfig(
         "warn",
         { argsIgnorePattern: "^_" },
       ],
+      // `import { type A, type B } from "x"` still emits require("x") under
+      // verbatimModuleSyntax - that once shipped require("@signalk/server-api"),
+      // a devDependency, in the plugin bundle. use `import type { A, B }`.
+      "@typescript-eslint/no-import-type-side-effects": "error",
     },
   },
   {

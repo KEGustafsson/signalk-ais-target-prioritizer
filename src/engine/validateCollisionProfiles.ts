@@ -58,3 +58,30 @@ export function isValidCollisionProfiles(
     PROFILE_NAMES.every((name) => isValidProfile(d[name]))
   );
 }
+
+/**
+ * Copy just the fields a collision profile set is made of. Whatever else came in
+ * the request body or the file - stray keys, `__proto__`, nested junk - is left
+ * behind, so it can never reach the store or get written back to disk.
+ */
+export function cloneCollisionProfiles(
+  data: CollisionProfiles,
+): CollisionProfiles {
+  const threshold = (t: CollisionProfiles[ProfileName]["warning"]) => ({
+    cpa: t.cpa,
+    tcpa: t.tcpa,
+    speed: t.speed,
+  });
+  const profile = (p: CollisionProfiles[ProfileName]) => ({
+    warning: threshold(p.warning),
+    danger: threshold(p.danger),
+    guard: { range: p.guard.range, speed: p.guard.speed },
+  });
+  return {
+    current: data.current,
+    anchor: profile(data.anchor),
+    harbor: profile(data.harbor),
+    coastal: profile(data.coastal),
+    offshore: profile(data.offshore),
+  };
+}

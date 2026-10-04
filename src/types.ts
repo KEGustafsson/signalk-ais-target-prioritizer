@@ -63,6 +63,9 @@ export interface Vessel {
 
   // augmented:
   alarmIsMuted: boolean;
+  // when any delta for this vessel last arrived (local clock) - lets a vessel that
+  // never sends a valid position still age out
+  lastUpdateDate?: Date;
 
   // derived:
   range?: number;

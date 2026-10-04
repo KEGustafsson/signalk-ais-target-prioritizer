@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-import { DEFAULT_TRACK_RESOLUTION } from "../src/engine/constants";
+import {
+  DEFAULT_TRACK_RESOLUTION,
+  TRACKS_REFRESH_INTERVAL,
+} from "../src/engine/constants";
 import type { Tracks } from "../src/types";
 import type { Context } from "@signalk/server-api";
 
@@ -169,6 +172,49 @@ describe("the polling loop", () => {
 
     startTracksLoop();
     await vi.waitFor(() => expect(getTracks).toHaveBeenCalledTimes(2));
+  });
+
+  // turning trails off and on again inside one fetch used to leave the first loop
+  // running alongside the new one once that fetch came back
+  it("runs one loop after a stop and restart during a pending fetch", async () => {
+    vi.useFakeTimers();
+    getTrackResolution.mockResolvedValue(60000);
+    let release!: (t: Tracks) => void;
+    getTracks.mockReturnValueOnce(new Promise<Tracks>((r) => (release = r)));
+    getTracks.mockResolvedValue({});
+
+    startTracksLoop(); // fetch 1 - left pending
+    stopTracksLoop();
+    startTracksLoop(); // fetch 2
+    await vi.advanceTimersByTimeAsync(0);
+    release({}); // the stale loop's fetch comes back
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getTracks).toHaveBeenCalledTimes(2);
+
+    // one interval later exactly one more poll - not one per loop
+    await vi.advanceTimersByTimeAsync(TRACKS_REFRESH_INTERVAL);
+    expect(getTracks).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not let a stale loop's fetch overwrite the current tracks", async () => {
+    vi.useFakeTimers();
+    getTrackResolution.mockResolvedValue(60000);
+    let releaseStale!: (t: Tracks) => void;
+    getTracks.mockReturnValueOnce(
+      new Promise<Tracks>((r) => (releaseStale = r)),
+    );
+    const current = payload();
+    getTracks.mockResolvedValue(current);
+
+    startTracksLoop(); // fetch 1 - left pending
+    stopTracksLoop();
+    startTracksLoop(); // fetch 2 returns the current tracks
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tracksState.tracks).toEqual(current);
+
+    releaseStale({}); // the old fetch comes back late, with stale data
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tracksState.tracks).toEqual(current);
   });
 
   it("is safe to stop when never started", () => {

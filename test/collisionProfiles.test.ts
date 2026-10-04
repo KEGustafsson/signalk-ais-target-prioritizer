@@ -113,6 +113,53 @@ describe("setCollisionProfiles", () => {
     setCollisionProfiles(custom);
     expect(getActiveCollisionProfile().warning.cpa).toBe(3);
   });
+
+  it("rejects an invalid set and leaves the store as it was", () => {
+    const before = JSON.parse(JSON.stringify(collisionProfiles));
+    expect(() =>
+      setCollisionProfiles({ ...custom, coastal: { warning: {} } }),
+    ).toThrow();
+    expect(() => setCollisionProfiles(null)).toThrow();
+    expect(() =>
+      setCollisionProfiles({ ...custom, current: "lake" }),
+    ).toThrow();
+    expect(JSON.parse(JSON.stringify(collisionProfiles))).toEqual(before);
+  });
+
+  it("keeps only the known fields", () => {
+    setCollisionProfiles({
+      ...custom,
+      extra: "junk",
+      coastal: {
+        ...custom.coastal,
+        warning: { ...custom.coastal.warning, colour: "red" },
+      },
+    });
+    expect(collisionProfiles).not.toHaveProperty("extra");
+    expect(collisionProfiles.coastal.warning).not.toHaveProperty("colour");
+  });
+
+  it("cannot be used to reach the object prototype", () => {
+    setCollisionProfiles(
+      JSON.parse(
+        JSON.stringify({ ...custom }).replace(
+          /^{/,
+          '{"__proto__":{"polluted":true},',
+        ),
+      ),
+    );
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(
+      (collisionProfiles as unknown as Record<string, unknown>).polluted,
+    ).toBeUndefined();
+  });
+
+  it("does not share objects with what it was given", () => {
+    const input = structuredClone(custom);
+    setCollisionProfiles(input);
+    input.coastal.warning.cpa = 9;
+    expect(collisionProfiles.coastal.warning.cpa).toBe(3);
+  });
 });
 
 describe("resetCollisionProfiles", () => {

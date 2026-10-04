@@ -12,6 +12,7 @@ import {
   ORDER_OPENING,
   ORDER_WARNING,
   RANGE_CEILING_NM,
+  STOPPED_SOG,
   TCPA_CEILING,
   TIEBREAK_MAX,
 } from "./constants";
@@ -30,13 +31,16 @@ export function toDeg(radians: number): number {
 // equirectangular projection
 export function calcProjection(v: Vessel, m: Vessel): Vector2D | undefined {
   if (
-    v.latitude === null ||
-    v.longitude === null ||
-    m.latitude === null ||
-    m.longitude === null
+    !isValidNumber(v.latitude) ||
+    !isValidNumber(v.longitude) ||
+    !isValidNumber(m.latitude) ||
+    !isValidNumber(m.longitude)
   )
     return;
-  const x = toRad(v.longitude - m.longitude) * Math.cos(toRad(m.latitude)) * R;
+  // wrap the longitude difference into -180..180, or two vessels a few miles apart
+  // either side of the antimeridian come out the whole way round the world apart
+  const dLon = ((((v.longitude - m.longitude + 180) % 360) + 360) % 360) - 180;
+  const x = toRad(dLon) * Math.cos(toRad(m.latitude)) * R;
   const y = toRad(v.latitude - m.latitude) * R;
   return { x, y };
 }
@@ -50,9 +54,15 @@ export function calcBearing(p: Vector2D): number {
 }
 
 // sog in m/s, cog in radians
-export function calcVelocity(v: Vessel): Vector2D {
-  // if we dont have sog or cog, assume the vessel is not moving and proceed with cpa calc
-  if (v.sog === null || v.cog === null) return { x: 0, y: 0 };
+export function calcVelocity(v: Vessel): Vector2D | undefined {
+  // if we dont have sog, assume the vessel is not moving and proceed with cpa calc.
+  // the same when it is barely moving: its course then does not matter
+  if (v.sog == null) return { x: 0, y: 0 };
+  if (isValidNumber(v.sog) && v.sog < STOPPED_SOG) return { x: 0, y: 0 };
+  // but a vessel known to be moving on an unknown course, or one whose sog or cog
+  // is present and not a number, could be going anywhere - calling it stopped
+  // could invent a collision course, or hide a real one, so no cpa at all
+  if (!isValidNumber(v.sog) || !isValidNumber(v.cog)) return;
 
   return {
     x: v.sog * Math.sin(v.cog),
@@ -62,8 +72,8 @@ export function calcVelocity(v: Vessel): Vector2D {
 
 export function calcCpa(
   projection: Vector2D,
-  velocity: Vector2D,
-  myVelocity: Vector2D,
+  velocity: Vector2D | undefined,
+  myVelocity: Vector2D | undefined,
 ): { tcpa: number; cpa: number } | undefined {
   if (!projection || !velocity || !myVelocity) return;
 
@@ -82,20 +92,26 @@ export function calcCpa(
 
   const cx = projection.x + v.x * t;
   const cy = projection.y + v.y * t;
+  const cpa = Math.sqrt(cx * cx + cy * cy);
+
+  // a NaN in any input would otherwise come out as a NaN cpa/tcpa and be published
+  if (!isValidNumber(t) || !isValidNumber(cpa)) return;
 
   return {
     tcpa: t,
-    cpa: Math.sqrt(cx * cx + cy * cy),
+    cpa,
   };
 }
 
+// turf's destination() throws on a non-number, and one bad vessel would then abort
+// the whole update pass - so these check for real numbers, not just for null
 export function calcCpaLocation(v: Vessel, tcpa: number): Position | undefined {
   if (
-    v.latitude === null ||
-    v.longitude === null ||
-    v.cog === null ||
-    v.sog === null ||
-    tcpa === undefined
+    !isValidNumber(v.latitude) ||
+    !isValidNumber(v.longitude) ||
+    !isValidNumber(v.cog) ||
+    !isValidNumber(v.sog) ||
+    !isValidNumber(tcpa)
   )
     return;
 
@@ -123,10 +139,10 @@ export function calcCpaLocation(v: Vessel, tcpa: number): Position | undefined {
 
 export function calcPredictedLocation(v: Vessel): Position | undefined {
   if (
-    v.latitude === null ||
-    v.longitude === null ||
-    v.cog === null ||
-    v.sog === null
+    !isValidNumber(v.latitude) ||
+    !isValidNumber(v.longitude) ||
+    !isValidNumber(v.cog) ||
+    !isValidNumber(v.sog)
   )
     return;
 
@@ -279,14 +295,20 @@ export function calcAlarms(
     // also pushed a very distant target past the 999999 the symbol sort key is
     // derived from. Each term is now scaled into 0..TIEBREAK_MAX instead.
 
-    // sort sooner tcpa vessels to top
+    // sort sooner tcpa vessels to top. no tcpa at all scores as the worst, not the
+    // best - otherwise an opening guard-zone target outranks an imminent collision
+    // in the danger band
     if (isValidNumber(tcpa) && tcpa > 0) {
       alarms.order += tiebreak(tcpa, TCPA_CEILING);
+    } else if (!isValidNumber(tcpa)) {
+      alarms.order += TIEBREAK_MAX;
     }
 
-    // sort closer cpa vessels to top
+    // sort closer cpa vessels to top - and, as for tcpa, no cpa to the bottom
     if (isValidNumber(cpa) && cpa > 0) {
       alarms.order += tiebreak(cpa / METERS_PER_NM, CPA_CEILING_NM);
+    } else if (!isValidNumber(cpa)) {
+      alarms.order += TIEBREAK_MAX;
     }
 
     // TODO might be interesting to calculate rate of closure

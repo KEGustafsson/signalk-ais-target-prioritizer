@@ -304,3 +304,79 @@ describe("connection state", () => {
     expect(ingestion.connectionState).toBe(CONNECTED);
   });
 });
+
+describe("navigation.position validation", () => {
+  it("keeps the last good fix when a position arrives without a coordinate", () => {
+    ingest(update("navigation.position", { latitude: 10, longitude: 20 }));
+    const seen = vessels[CTX].lastSeenDate;
+    ingest(update("navigation.position", { latitude: 11 }));
+    expect(vessels[CTX].latitude).toBe(10);
+    expect(vessels[CTX].longitude).toBe(20);
+    expect(vessels[CTX].lastSeenDate).toBe(seen);
+  });
+
+  it("ignores an out of range position", () => {
+    ingest(update("navigation.position", { latitude: 91, longitude: 0 }));
+    expect(vessels[CTX].latitude).toBeNull();
+    ingest(update("navigation.position", { latitude: 0, longitude: 181 }));
+    expect(vessels[CTX].longitude).toBeNull();
+  });
+
+  it("accepts the equator and the prime meridian", () => {
+    ingest(update("navigation.position", { latitude: 0, longitude: 0 }));
+    expect(vessels[CTX].latitude).toBe(0);
+    expect(vessels[CTX].longitude).toBe(0);
+  });
+
+  it("falls back to now for an unparseable timestamp", () => {
+    ingest(
+      update("navigation.position", { latitude: 1, longitude: 1 }, "garbage"),
+    );
+    expect(Number.isNaN(vessels[CTX].lastSeenDate?.getTime())).toBe(false);
+  });
+});
+
+describe("malformed deltas", () => {
+  it("drops a malformed delta without freezing ingestion", () => {
+    // imo as a number used to throw inside the flush and leave it locked for good
+    ingest(update("", { registrations: { imo: 1234567 } }));
+    ingest(update("navigation.speedOverGround", 5));
+    expect(vessels[CTX].sog).toBe(5);
+  });
+
+  it("ignores identity fields of the wrong type", () => {
+    ingest(
+      update("", {
+        name: 42,
+        mmsi: 230941380,
+        communication: { callsignVhf: {} },
+      }),
+    );
+    expect(vessels[CTX].name).toBeNull();
+    expect(vessels[CTX].mmsi).toBe("230941380"); // from the context, not the bad value
+    expect(vessels[CTX].callsign).toBeNull();
+  });
+
+  it("recovers after an update list that throws", () => {
+    queueVesselUpdates(CTX, [{ values: null } as unknown as Update]);
+    flushPendingUpdates();
+    ingest(update("navigation.speedOverGround", 7));
+    expect(vessels[CTX].sog).toBe(7);
+  });
+
+  it("never turns a prototype key into a vessel", () => {
+    for (const bad of ["__proto__", "constructor", "toString", "nodots"]) {
+      queueVesselUpdates(bad as Context, [
+        update("navigation.speedOverGround", 1),
+      ]);
+    }
+    flushPendingUpdates();
+    expect(Object.keys(vessels)).toHaveLength(0);
+    expect(({} as Record<string, unknown>).sog).toBeUndefined();
+  });
+
+  it("records when any delta last arrived", () => {
+    ingest(update("design.length", { overall: 20 }));
+    expect(vessels[CTX].lastUpdateDate).toBeInstanceOf(Date);
+  });
+});

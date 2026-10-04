@@ -136,6 +136,16 @@
     const style = buildStyle();
     mapState.styleId = getStyleId();
 
+    // the vessel calculations and alarm checks do not need the map. starting them
+    // only once the style had loaded meant a basemap that never loads (a chart
+    // server down, a flaky link) left the collision alarms off altogether
+    startUpdateMapLoop();
+
+    // delay showing alarms for a sec... its a better user experience
+    setTimeout(async () => {
+      alarmsState.alarmsEnabled = true;
+    }, 1000);
+
     console.log("setting up maplibre", mapState.basemapId, ui.darkMode, style);
 
     const map = new Map({
@@ -156,12 +166,6 @@
       addSources();
       addLayers();
       registerAllIcons(map);
-      startUpdateMapLoop();
-
-      // delay showing alarms for a sec... its a better user experience
-      setTimeout(async () => {
-        alarmsState.alarmsEnabled = true;
-      }, 1000);
 
       // FIXME does this have to be in onLoad?
       map.addControl(
@@ -436,36 +440,45 @@
   }
 
   function updateMapLoop() {
-    if (ui.documentVisibilityState === "visible") updateMap();
+    // one bad tick must not end the loop - nothing would restart it, and the
+    // plot and alarms would freeze for good
+    try {
+      updateMap();
+    } catch (err) {
+      console.error("updateMap failed", err);
+    }
     updateMapLoopTimeoutId = setTimeout(updateMapLoop, DATA_REFRESH_INTERVAL);
   }
 
   function updateMap() {
-    // FIXME consider adding try/catch to deal with basemap switches that might tyeardown layers while updateMap is running
-    // if (updateMapInprogress || basemapSwitching)  return;
     if (updateMapInprogress) return;
     // console.log("updateMap start");
     updateMapInprogress = true;
     const start = performance.now();
-    console.time("updateMap");
 
-    updateVessels();
+    try {
+      // always, even with the tab hidden: this drains the queue of incoming deltas,
+      // which otherwise grows by hundreds of MB an hour in a background tab - and
+      // the alarm checks must not wait for someone to look at the screen
+      updateVessels();
+      checkForAlarms();
+      checkForErrors();
 
-    updateRangeRingsFeatures();
-    updateTrailFeatures();
-    updateVesselFeatures();
-    updatePredictorFeatures();
-    updateCamera();
+      // drawing only when someone can see it (each of these also waits for the
+      // map style to have loaded)
+      if (ui.documentVisibilityState === "visible") {
+        updateRangeRingsFeatures();
+        updateTrailFeatures();
+        updateVesselFeatures();
+        updatePredictorFeatures();
+        updateCamera();
+      }
 
-    checkForAlarms();
-    checkForErrors();
-
-    console.timeEnd("updateMap");
-    stats.time = performance.now() - start;
-    stats.count = getCounts().total;
-    // console.log({ myVessel, selectedVessel });
-
-    updateMapInprogress = false;
+      stats.time = performance.now() - start;
+      stats.count = getCounts().total;
+    } finally {
+      updateMapInprogress = false;
+    }
     // console.log("updateMap end");
   }
 
@@ -705,6 +718,8 @@
       const lon = myVessel?.longitude;
       const lat = myVessel?.latitude;
       const cog = myVessel?.cog;
+      // only course up needs a course - north up can follow own ship without one
+      const bearing = isValidNumber(cog) ? toDeg(cog) : undefined;
       const isDragPanActive = mapState.instance.dragPan.isActive();
       const isMapMoving = mapState.instance.isMoving();
 
@@ -717,7 +732,7 @@
         !myVessel ||
         !isValidNumber(lon) ||
         !isValidNumber(lat) ||
-        !isValidNumber(cog)
+        (isCourseUp && bearing === undefined)
       ) {
         // console.log("cancelling updateCamera", {
         //   isDragPanActive,
@@ -740,7 +755,7 @@
         // });
         await easeToAsync(mapState.instance, {
           center: [lon, lat],
-          bearing: isCourseUp ? toDeg(cog) : 0,
+          bearing: isCourseUp ? (bearing ?? 0) : 0,
         });
 
         firstNotification = true;
@@ -943,7 +958,7 @@
         "Error",
         `Not connected to Signal K server.\nCurrent connection status: ${ingestion.connectionState}`,
       );
-    } else if (!vesselsState.myVesselContext) {
+    } else if (!myVessel) {
       showNotification(
         "Error",
         "No data for our own vessel received from Signal K server",

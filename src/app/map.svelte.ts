@@ -64,6 +64,13 @@ export function getStyleId(): string {
   return `${mapState.basemapId}-${String(ui.darkMode)}`;
 }
 
+// the plugin only accepts state changes with a json body (csrf guard)
+const JSON_POST = {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: "{}",
+};
+
 export async function checkFontsAvailable() {
   // clear first, so the UI reports "checking" rather than the previous answer
   mapState.protomapsFontsAvailable = undefined;
@@ -75,8 +82,14 @@ export async function checkFontsAvailable() {
 
 export async function handleDownloadFonts() {
   mapState.fontsDownloading = true;
-  await fetch(`/plugins/${PLUGIN_ID}/download-fonts`, { method: "POST" });
-  mapState.fontsDownloading = false;
+  try {
+    await fetch(`/plugins/${PLUGIN_ID}/download-fonts`, JSON_POST);
+  } catch (err) {
+    console.error("font download failed", err);
+  } finally {
+    // a network error must not leave the button stuck on "Downloading..."
+    mapState.fontsDownloading = false;
+  }
   await checkFontsAvailable();
   if (
     basemaps[mapState.basemapId].type === "signalk-protomaps-pmtiles" &&
@@ -87,7 +100,7 @@ export async function handleDownloadFonts() {
 }
 
 export async function handleRemoveFonts() {
-  await fetch(`/plugins/${PLUGIN_ID}/remove-fonts`, { method: "POST" });
+  await fetch(`/plugins/${PLUGIN_ID}/remove-fonts`, JSON_POST);
   await checkFontsAvailable();
   if (
     basemaps[mapState.basemapId].type === "signalk-protomaps-pmtiles" &&

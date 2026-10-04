@@ -22,21 +22,17 @@
   } from "../engine/ingestion.svelte";
   import { resolveIsDark, ui } from "./ui.svelte";
   import { checkFontsAvailable, mapState } from "./map.svelte";
-  import { checkConnectivity, connectivity } from "./connectivity.svelte";
+  import { checkConnectivity } from "./connectivity.svelte";
   import { CircleCheck, CircleX, Info, TriangleAlert } from "@lucide/svelte";
   import { basemaps, DEFAULT_BASEMAP, initBasemaps } from "./basemaps.svelte";
-  import type { CollisionProfiles, InitStep } from "../types";
+  import type { InitStep } from "../types";
   import ky from "ky";
   import { vessels, vesselsState } from "../engine/vessels.svelte";
-  import {
-    getMutedVessels,
-    loadCollisionProfiles,
-    saveCollisionProfiles,
-  } from "./utils/api";
+  import { getMutedVessels, loadCollisionProfiles } from "./utils/api";
   import { mute } from "../engine/alarms.svelte";
   import { isValidCollisionProfiles } from "../engine/validateCollisionProfiles";
+  import { isValidNumber } from "../engine/calculations";
   import {
-    collisionProfiles,
     resetCollisionProfiles,
     setCollisionProfiles,
   } from "../engine/collisionProfiles.svelte";
@@ -51,13 +47,6 @@
       ? vessels[vesselsState.myVesselContext]
       : undefined,
   );
-
-  $inspect({ basemapId: mapState.basemapId });
-  $inspect({ openSeaMap: mapState.openSeaMap });
-  $inspect({ styleId: mapState.styleId });
-  $inspect({ darkMode: ui.darkMode });
-  $inspect({ documentVisibilityState: ui.documentVisibilityState });
-  $inspect({ online: connectivity.online });
 
   // let initSteps = $state<InitStep[]>([
   const initSteps = $state<Record<string, InitStep>>({
@@ -124,7 +113,12 @@
 
   async function waitForMyVesselPosition() {
     const start = Date.now();
-    while (!myVessel || !myVessel.latitude || !myVessel.longitude) {
+    // a real number check - 0 is a valid latitude (equator) and longitude (greenwich)
+    while (
+      !myVessel ||
+      !isValidNumber(myVessel.latitude) ||
+      !isValidNumber(myVessel.longitude)
+    ) {
       if (Date.now() - start > INIT_TIMEOUT) {
         throw new Error("No data received for my vessel");
       }
@@ -171,21 +165,17 @@
 
   async function initCollisionProfiles() {
     console.log(">>> ENTER initCollisionProfiles");
-    try {
-      const loadedCollisionProfiles: CollisionProfiles | undefined =
-        await loadCollisionProfiles();
-      if (isValidCollisionProfiles(loadedCollisionProfiles)) {
-        setCollisionProfiles(loadedCollisionProfiles);
-      } else {
-        console.warn("WARNING: invalid configuration. Using defaults.");
-        resetCollisionProfiles();
-        const result = await saveCollisionProfiles(collisionProfiles);
-        if (!result.success)
-          throw new Error("Unable to save default collision profile");
-      }
-    } catch (err) {
-      console.error("saveCollisionProfiles failed:", err);
-      throw err; // rethrow to trackedInit for red icon
+    // a failed request throws through to trackedInit (red icon) and saves nothing.
+    // it used to fall through to "invalid" and write the defaults over the user's
+    // saved profiles - which drive the plugin's alarms too - on one slow start
+    const loadedCollisionProfiles = await loadCollisionProfiles();
+    if (isValidCollisionProfiles(loadedCollisionProfiles)) {
+      setCollisionProfiles(loadedCollisionProfiles);
+    } else {
+      // the server validates what it stores, so this is a webapp/plugin version
+      // mismatch. run on the defaults here, but leave the server's copy alone
+      console.warn("WARNING: invalid configuration. Using defaults.");
+      resetCollisionProfiles();
     }
     console.log(">>> EXIT initCollisionProfiles");
   }

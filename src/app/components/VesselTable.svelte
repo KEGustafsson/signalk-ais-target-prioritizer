@@ -17,7 +17,7 @@
   } from "../utils/formatUtils";
   import { getVesselSvg } from "../utils/svgUtils";
   import { vessels, vesselsState } from "../../engine/vessels.svelte";
-  import { type Vessel } from "../../types";
+  import type { Vessel } from "../../types";
   import { ui } from "../ui.svelte";
   import { isValidNumber } from "../../engine/calculations";
   import type { Context } from "@signalk/server-api";
