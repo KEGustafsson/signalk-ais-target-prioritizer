@@ -50,24 +50,30 @@ export async function refreshTracks() {
 }
 
 let running = false;
+// bumped on every start and stop. a loop still awaiting its fetch when the loop is
+// stopped and restarted must not carry on alongside the new one - the running flag
+// alone cannot tell them apart
+let generation = 0;
 
 export function startTracksLoop() {
   if (running) return;
   running = true;
+  const gen = ++generation;
   refreshResolution();
-  tracksLoop();
+  tracksLoop(gen);
 }
 
 // wait for each poll before scheduling the next, so a download slower than the
 // interval cannot overlap the next one and land out of order
-async function tracksLoop() {
+async function tracksLoop(gen: number) {
   await refreshTracks();
-  if (!running) return;
-  timeoutId = setTimeout(tracksLoop, TRACKS_REFRESH_INTERVAL);
+  if (!running || gen !== generation) return;
+  timeoutId = setTimeout(() => tracksLoop(gen), TRACKS_REFRESH_INTERVAL);
 }
 
 export function stopTracksLoop() {
   running = false;
+  generation++;
   clearTimeout(timeoutId);
   timeoutId = undefined;
 }

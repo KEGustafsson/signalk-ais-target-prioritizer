@@ -1,12 +1,19 @@
-import { existsSync, readdirSync, mkdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { extract } from "tar";
 import { Readable } from "node:stream";
 import type { IRouter } from "express";
 
-const FONTS_DIR = path.join(__dirname, "../public/assets/protomaps/fonts");
-const SPRITES_DIR = path.join(__dirname, "../public/assets/protomaps/sprites");
+const ASSETS_DIR = path.join(__dirname, "../public/assets/protomaps");
+const PACK_DIRS = ["fonts", "sprites"] as const;
 const FONTS_URL =
   "https://github.com/protomaps/basemaps-assets/archive/refs/heads/main.tar.gz";
 const DOWNLOAD_TIMEOUT = 5 * 60_000; // milliseconds
@@ -30,11 +37,15 @@ export function isFontPackEntry(filePath: string, entry: object): boolean {
 
 let downloading = false;
 
-export function registerAssetEndpoints(router: IRouter) {
+export function registerAssetEndpoints(
+  router: IRouter,
+  assetsDir: string = ASSETS_DIR,
+) {
+  const fontsDir = path.join(assetsDir, "fonts");
+
   // check if fonts are installed
   router.get(`/fonts-available`, (req, res) => {
-    const available =
-      existsSync(FONTS_DIR) && readdirSync(FONTS_DIR).length > 0;
+    const available = existsSync(fontsDir) && readdirSync(fontsDir).length > 0;
     res.status(available ? 200 : 404).json({ available });
   });
 
@@ -47,9 +58,13 @@ export function registerAssetEndpoints(router: IRouter) {
       return;
     }
     downloading = true;
+    let staging: string | undefined;
     try {
-      mkdirSync(FONTS_DIR, { recursive: true });
-      mkdirSync(SPRITES_DIR, { recursive: true });
+      mkdirSync(assetsDir, { recursive: true });
+      // unpack beside the live pack and swap it in only once the whole download
+      // has succeeded: a failure or timeout part way through would otherwise leave
+      // a partial pack that /fonts-available reports as installed
+      staging = mkdtempSync(path.join(assetsDir, ".download-"));
 
       const response = await fetch(FONTS_URL, {
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT),
@@ -61,17 +76,31 @@ export function registerAssetEndpoints(router: IRouter) {
       await pipeline(
         Readable.fromWeb(response.body as import("stream/web").ReadableStream),
         extract({
-          cwd: path.join(__dirname, "../public/assets/protomaps"),
+          cwd: staging,
           strip: 1,
           filter: isFontPackEntry,
         }),
       );
+
+      const stagedFonts = path.join(staging, "fonts");
+      if (!existsSync(stagedFonts) || readdirSync(stagedFonts).length === 0) {
+        throw new Error("font pack contained no fonts");
+      }
+
+      for (const dir of PACK_DIRS) {
+        const staged = path.join(staging, dir);
+        if (!existsSync(staged)) continue;
+        const live = path.join(assetsDir, dir);
+        rmSync(live, { recursive: true, force: true });
+        renameSync(staged, live);
+      }
 
       res.json({ success: true });
     } catch (err) {
       console.error("Font download failed:", err);
       res.status(500).json({ error: String(err) });
     } finally {
+      if (staging) rmSync(staging, { recursive: true, force: true });
       downloading = false;
     }
   });
@@ -79,8 +108,9 @@ export function registerAssetEndpoints(router: IRouter) {
   // remove fonts
   router.post(`/remove-fonts`, (req, res) => {
     try {
-      if (existsSync(FONTS_DIR)) rmSync(FONTS_DIR, { recursive: true });
-      if (existsSync(SPRITES_DIR)) rmSync(SPRITES_DIR, { recursive: true });
+      for (const dir of PACK_DIRS) {
+        rmSync(path.join(assetsDir, dir), { recursive: true, force: true });
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: String(err) });
